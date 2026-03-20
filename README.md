@@ -168,6 +168,6 @@ Stop-Service winlogbeat
 Remove-Item "C:\ProgramData\winlogbeat\data\registry\filebeat\log.json" -ErrorAction SilentlyContinue
 Start-Service winlogbeat
 ```
-[todo]
+#todo
 Config script for Windows Server to setup the Domain controler
 Maybe a provisioning script to build the windows VM in proxmox too
