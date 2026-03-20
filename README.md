@@ -57,6 +57,8 @@ At the end you will see something like:
 
 ## Connecting Kusto Explorer
 
+> Download: https://aka.ms/ke
+
 1. Open **Kusto Explorer** (Windows) → **Add Connection**
 2. Cluster URI: `http://<HOST_IP>:8080`
 3. Database: `NetDefaultDB`
