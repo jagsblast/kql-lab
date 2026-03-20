@@ -29,7 +29,7 @@ Windows DC (WinLogBeat)
 ## Quick start (Linux host)
 
 ```bash
-git clone <this-repo> kql-lab
+git clone https://github.com/jagsblast/kql-lab.git kql-lab
 cd kql-lab
 chmod +x setup.sh teardown.sh
 ./setup.sh
