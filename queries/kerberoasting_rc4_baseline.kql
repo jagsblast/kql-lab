@@ -1,0 +1,71 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// Kerberoasting Detection — RC4 Baseline (no burst threshold, no SPN allowlist)
+//
+// Primary signal: RC4-HMAC-MD5 (0x17) on a TGS for a non-machine SPN.
+// That single indicator is sufficient — RC4 on a service ticket to a user-owned
+// SPN is the kerberoasting tell regardless of what TicketOptions says.
+//
+// TicketOptions note:
+//   0x40810010 (Forwardable + Renewable + Canonicalize + Renewable-OK) is the
+//   Rubeus/Impacket default, but tools can trivially change any bit and evade
+//   a single exact-match filter. Instead the flags are decoded individually
+//   and surfaced as boolean columns for analyst triage — none are used as hard
+//   filters. Bit positions (MSB-first, 32-bit field per RFC 4120):
+//     bit 1  (0x40000000) = Forwardable
+//     bit 2  (0x20000000) = Forwarded
+//     bit 8  (0x00800000) = Renewable
+//     bit 15 (0x00010000) = Canonicalize
+//     bit 27 (0x00000010) = Renewable-OK
+// ══════════════════════════════════════════════════════════════════════════════
+
+let lookback = ago(1h);
+
+WindowsEvents
+| where TimeCreated >= lookback
+| where EventId == 4769
+| extend
+    TargetUserName       = tostring(EventData.TargetUserName),
+    TargetDomainName     = tostring(EventData.TargetDomainName),
+    ServiceName          = tostring(EventData.ServiceName),
+    ServiceSid           = tostring(EventData.ServiceSid),
+    TicketEncryptionType = tostring(EventData.TicketEncryptionType),
+    TicketOptions        = tostring(EventData.TicketOptions),
+    IpAddress            = tostring(EventData.IpAddress),
+    IpPort               = tostring(EventData.IpPort),
+    Status               = tostring(EventData.Status)
+// ── Primary filter: RC4 cipher ───────────────────────────────────────────────
+// AES (0x11 / 0x12) is safe; 0x17 means the KDC issued a crackable ticket.
+| where TicketEncryptionType == "0x17"
+// Ticket was successfully issued (not rejected by the KDC)
+| where Status == "0x0"
+// Exclude machine-account self-tickets
+| where ServiceName !endswith "$"
+| where TargetUserName !endswith "$"
+| where TargetUserName !contains "ANONYMOUS"
+// ── Decode TicketOptions flags ───────────────────────────────────────────────
+// Not used as filters — surfaced so analysts can see which flags are set
+// and spot tools that deviate from the 0x40810010 default.
+| extend TicketOptionsInt = toint(TicketOptions)
+| extend
+    Flag_Forwardable  = binary_and(TicketOptionsInt, 0x40000000) != 0,
+    Flag_Forwarded    = binary_and(TicketOptionsInt, 0x20000000) != 0,
+    Flag_Renewable    = binary_and(TicketOptionsInt, 0x00800000) != 0,
+    Flag_Canonicalize = binary_and(TicketOptionsInt, 0x00010000) != 0,
+    Flag_RenewableOK  = binary_and(TicketOptionsInt, 0x00000010) != 0
+| project
+    TimeCreated,
+    TargetUserName,
+    TargetDomainName,
+    ServiceName,
+    ServiceSid,
+    TicketEncryptionType,
+    TicketOptions,
+    Flag_Forwardable,
+    Flag_Forwarded,
+    Flag_Renewable,
+    Flag_Canonicalize,
+    Flag_RenewableOK,
+    IpAddress,
+    IpPort,
+    Computer
+| order by TimeCreated desc

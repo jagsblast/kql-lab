@@ -1,0 +1,28 @@
+# ── Kustainer persistent data ─────────────────────────────────────────────────
+# Contains the ADX database engine files — never commit these.
+data/
+
+# ── Datasets / sample PCAPs / large blobs ─────────────────────────────────────
+datasets/
+
+# ── Generated artefacts ────────────────────────────────────────────────────────
+*.zip
+*.tar.gz
+*.log
+/tmp/
+
+# ── Docker leftovers ───────────────────────────────────────────────────────────
+.env
+docker-compose.override.yml
+
+# ── OS noise ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor temp files ──────────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

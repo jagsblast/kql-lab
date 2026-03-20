@@ -1,0 +1,72 @@
+# Windows Event Logs pipeline: WinLogBeat (DC) → Logstash → Kustainer (ADX)
+#
+#   Start :  ./setup.sh          (first run — creates DB, table, mapping)
+#   Stop  :  ./teardown.sh
+#   Purge :  ./teardown.sh --purge
+
+services:
+
+  # ── Azure Data Explorer (Kustainer) ────────────────────────────────────────
+  adx:
+    image: mcr.microsoft.com/azuredataexplorer/kustainer-linux:latest
+    container_name: adx
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - ./data:/kustodata
+    environment:
+      ACCEPT_EULA: "Y"
+      TZ: "Europe/London"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >
+          curl -sf -X POST http://localhost:8080/v1/rest/mgmt
+          -H 'Content-Type: application/json'
+          -d '{"db":"NetDefaultDB","csl":".show version"}'
+          -o /dev/null
+      interval: 15s
+      timeout: 10s
+      retries: 16
+      start_period: 30s
+
+  # ── Python relay — translates Logstash JSON to Kustainer mgmt commands ─────
+  relay:
+    build: ./relay
+    image: kql-lab-relay:latest
+    container_name: relay
+    restart: unless-stopped
+    depends_on:
+      adx:
+        condition: service_started
+    expose:
+      - "9001"
+    ports:
+      - "9001:9001"   # exposed for setup.sh test; not needed for WinLogBeat
+    environment:
+      KUSTAINER_URL:     "http://adx:8080"
+      KUSTAINER_DB:      "NetDefaultDB"
+      KUSTAINER_TABLE:   "WindowsEvents"
+      KUSTAINER_MAPPING: "winlogbeat_mapping"
+      RELAY_PORT:        "9001"
+      BATCH_MAX:         "50"
+
+  # ── Logstash — receives WinLogBeat events, ships to relay ─────────────────
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.17.0
+    container_name: logstash
+    restart: unless-stopped
+    depends_on:
+      adx:
+        condition: service_started
+      relay:
+        condition: service_started
+    ports:
+      - "5044:5044"    # Beats input — WinLogBeat connects here
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    environment:
+      LS_JAVA_OPTS: "-Xmx512m -Xms256m"

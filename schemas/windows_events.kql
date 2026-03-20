@@ -1,0 +1,72 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// Kerberoasting Detection — Tier 1 (bulk RC4 burst) + Tier 2 (sensitive SPN)
+// Table: WindowsEvents (Kustainer / NetDefaultDB)
+// ══════════════════════════════════════════════════════════════════════════════
+
+let rc4_enc          = "0x17";
+let burst_threshold  = 5;
+let burst_window     = 5m;
+let lookback         = ago(4h);
+let legacy_allowlist = dynamic(["netapp-host$", "cross-forest-trust-svc"]);
+let sensitive_spns   = dynamic([
+    "MSSQLSvc/sensitive-db.corp.local:1433",
+    "AGPMServer/gpo-mgmt.corp.local",
+    "FIMService/fim-server.corp.local",
+    "honeypot-svc/trap.corp.local",
+    "svc_sql"
+]);
+
+let RC4Requests =
+    WindowsEvents
+    | where TimeCreated >= lookback
+    | where EventId == 4769
+    | extend
+        TargetUserName      = tostring(EventData.TargetUserName),
+        TargetDomainName    = tostring(EventData.TargetDomainName),
+        ServiceName         = tostring(EventData.ServiceName),
+        TicketEncryptionType = tostring(EventData.TicketEncryptionType),
+        TicketOptions       = tostring(EventData.TicketOptions),
+        IpAddress           = tostring(EventData.IpAddress),
+        Status              = tostring(EventData.Status)
+    | where TicketEncryptionType == rc4_enc
+    | where Status == "0x0"
+    | where ServiceName !endswith "$"
+    | where TargetUserName !endswith "$"
+    | where TargetUserName !contains "ANONYMOUS"
+    | where ServiceName !in (legacy_allowlist)
+    | project TimeCreated, TargetUserName, TargetDomainName,
+              ServiceName, TicketEncryptionType, TicketOptions, IpAddress, Computer;
+
+let Tier1_Burst =
+    RC4Requests
+    | summarize
+        DistinctSPNCount = dcount(ServiceName),
+        SPNList          = make_set(ServiceName, 50),
+        FirstSeen        = min(TimeCreated),
+        LastSeen         = max(TimeCreated),
+        SourceIPs        = make_set(IpAddress, 10)
+      by TargetUserName, TargetDomainName, bin(TimeCreated, burst_window)
+    | where DistinctSPNCount >= burst_threshold
+    | extend
+        AlertTier   = "Tier1-BulkKerberoasting",
+        Severity    = "High",
+        Description = strcat("Account requested RC4 TGS for ",
+                             DistinctSPNCount, " distinct SPNs in 5 minutes");
+
+let Tier2_SensitiveSPN =
+    RC4Requests
+    | where ServiceName in (sensitive_spns)
+    | extend
+        AlertTier        = "Tier2-SensitiveOrHoneypotSPN",
+        Severity         = "Critical",
+        Description      = strcat("RC4 TGS requested for sensitive/honeypot SPN: ", ServiceName),
+        DistinctSPNCount = 1,
+        SPNList          = pack_array(ServiceName),
+        FirstSeen        = TimeCreated,
+        LastSeen         = TimeCreated,
+        SourceIPs        = pack_array(IpAddress);
+
+union Tier1_Burst, Tier2_SensitiveSPN
+| project AlertTier, Severity, TargetUserName, TargetDomainName,
+          DistinctSPNCount, SPNList, SourceIPs, FirstSeen, LastSeen, Description
+| order by Severity asc, DistinctSPNCount desc

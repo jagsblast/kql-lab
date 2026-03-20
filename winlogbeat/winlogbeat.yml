@@ -1,0 +1,170 @@
+# winlogbeat.yml - Windows Event Log shipper for the DC (192.168.68.64)
+# Ships to Logstash on the Linux host (192.168.68.61:5044).
+#
+# Deploy: copy this folder to the DC and run .\install-winlogbeat.ps1 as Admin.
+#
+# The installer script automatically applies all required audit policies via
+# auditpol and Group Policy registry keys so these event IDs actually fire.
+# ------------------------------------------------------------------------------
+
+winlogbeat.event_logs:
+
+  # ---- Application & System --------------------------------------------------
+  - name: Application
+    ignore_older: 72h
+
+  - name: System
+    ignore_older: 72h
+
+  # ---- Security log ----------------------------------------------------------
+  # Logon/Logoff
+  #   4624 Successful logon            4625 Failed logon
+  #   4626 User/Device claims          4627 Group membership info
+  #   4634 Logoff                      4647 User-initiated logoff
+  #   4648 Explicit credential logon   4649 Replay attack detected
+  #   4672 Special privilege logon     4675 SIDs filtered
+  #   4778 Session reconnected         4779 Session disconnected
+  #   4800-4803 Workstation lock/unlock
+  # Account Management
+  #   4720 User created    4722 Enabled   4723/4724 Pwd change/reset
+  #   4725 Disabled        4726 Deleted   4727-4735 Global/local group changes
+  #   4738 User changed    4739 Domain policy changed
+  #   4740 Account lockout 4741-4743 Computer account changes
+  #   4756-4758 Universal group member  4764 Group type changed
+  #   4765/4766 SID history            4767 Account unlocked
+  #   4780 ACL set on admin account    4781 Account renamed
+  #   4782 Pwd hash accessed           4793 Pwd policy API called
+  #   4794 DSRM password set           4798/4799 Local group enumeration
+  # Kerberos / NTLM
+  #   4768 TGT request   4769 Service ticket   4770 Ticket renewed
+  #   4771 Pre-auth fail  4772 Auth fail        4773 Ticket request fail
+  #   4774 Account mapped 4775 Cannot map       4776 NTLM validation
+  #   4777 NTLM fail      5461/5827/5828 NTLM auth blocked
+  # AD / DS Replication (DCSync detection)
+  #   4928-4937 Naming context replica source/dest changes
+  # Process & Object
+  #   4656/4658/4660/4663 Object access   4657 Registry value change
+  #   4659 Handle requested for delete     4662 AD object operation
+  #   4688 Process created                4689 Process exited
+  # Attack Technique Coverage (Advanced AD Attacks)
+  #   4662 DCSync: fires when replication rights exercised outside a DC
+  #        SACL on domain root required (set by install-winlogbeat.ps1 step 4i)
+  #   4659 Object delete handle - anti-forensics / credential cleanup detection
+  #   4768 AS-REP Roasting: TGT issued for account lacking pre-auth (RC4 enc)
+  #   4769 Kerberoasting: svc ticket with EncryptionType 0x17 (RC4-HMAC-MD5)
+  #        Search for TicketOptions 0x40810010 + non-machine requesters
+  #   4771 Kerberos pre-auth failure - brute force or AS-REP candidates
+  #   4776 NTLM credential validation - Pass-the-Hash indicator
+  #   4928-4937 AD replication source/dest - DCSync from non-DC source IP
+  #   5136 DS object write - RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity),
+  #        SPN add/remove, AdminSDHolder tampering, ACL delegation abuse
+  #   5141 DS object deleted - Shadow Credentials artifact cleanup
+  # Policy Change
+  #   4704/4705 User right assign/remove  4706/4707 Domain trust
+  #   4713 Kerberos policy changed        4716-4719 Trust / audit policy
+  #   4739 Domain policy changed          4902/4904-4913 Audit policy changes
+  #   5136/5137/5138/5139/5141 AD object modified/created/moved/deleted
+  # Privilege Use
+  #   4673 Privileged service called      4674 Privileged object operation
+  # Certificate Services
+  #   4886/4887/4888 Cert requested/issued/denied
+  #   4890-4898 CA config changes
+  # Firewall / IPsec
+  #   5024/5025 Windows Firewall svc      5027-5030/5032-5035/5037 Firewall error
+  #   4944-4958 Firewall rules at startup/runtime
+  # Credential / Secret
+  #   5376/5377 Credential manager backup  5379-5382 Credential manager ops
+  # Misc high value
+  #   1100/1102 Audit log cleared          1104/1105 Log full
+  #   4616 System time changed             4697/7045 Service installed
+  #   6144/6145 GPO applied with error
+
+  - name: Security
+    ignore_older: 72h
+    # No event_id filter here - Windows XPath query length limit causes
+    # "The specified query is invalid" when the list exceeds ~100 IDs,
+    # silently killing the Security subscription. Filter in KQL instead.
+
+  # ---- Active Directory Domain Services -------------------------------------
+  # Replication failures, schema changes, lingering objects, SYSVOL issues
+  - name: "Directory Service"
+    ignore_older: 72h
+    event_id: >
+      1126, 1311, 1388, 1566, 1925, 1926,
+      2042, 2092, 2095, 2896
+
+  # ---- DNS Server -----------------------------------------------------------
+  - name: "DNS Server"
+    ignore_older: 72h
+    event_id: >
+      150, 400, 408, 501, 502, 503, 6001, 6002, 6003, 6004
+
+  # ---- Windows Defender / Antimalware --------------------------------------
+  - name: "Microsoft-Windows-Windows Defender/Operational"
+    ignore_older: 72h
+    event_id: >
+      1006, 1007, 1008, 1009, 1010,
+      1116, 1117, 1118, 1119, 1120,
+      2001, 2003, 2004, 5001, 5004, 5008, 5010, 5012
+
+  # ---- PowerShell logging ---------------------------------------------------
+  # Requires script block logging (enabled by install-winlogbeat.ps1)
+  - name: "Microsoft-Windows-PowerShell/Operational"
+    ignore_older: 72h
+    event_id: 4103, 4104, 4105, 4106
+
+  - name: "Windows PowerShell"
+    ignore_older: 72h
+    event_id: 400, 403, 500, 501, 600
+
+  # ---- Task Scheduler -------------------------------------------------------
+  - name: "Microsoft-Windows-TaskScheduler/Operational"
+    ignore_older: 72h
+    event_id: 106, 140, 141, 200, 201
+
+  # ---- NTLM authentication --------------------------------------------------
+  - name: "Microsoft-Windows-NTLM/Operational"
+    ignore_older: 72h
+
+  # ---- Windows Remote Management (WinRM/PSRemoting) -------------------------
+  - name: "Microsoft-Windows-WinRM/Operational"
+    ignore_older: 72h
+    event_id: 6, 8, 15, 16, 33
+
+  # ---- Windows Firewall changes ---------------------------------------------
+  - name: "Microsoft-Windows-Windows Firewall With Advanced Security/Firewall"
+    ignore_older: 72h
+    event_id: 2003, 2004, 2005, 2006, 2009, 2033
+
+  # ---- AppLocker (if policy is configured) ----------------------------------
+  - name: "Microsoft-Windows-AppLocker/EXE and DLL"
+    ignore_older: 72h
+  - name: "Microsoft-Windows-AppLocker/MSI and Script"
+    ignore_older: 72h
+
+  # ---- Sysmon (if installed on the DC) --------------------------------------
+  - name: Microsoft-Windows-Sysmon/Operational
+    ignore_older: 72h
+
+# ---- Output -> Logstash (Beats protocol) ------------------------------------
+output.logstash:
+  hosts: ["192.168.68.61:5044"]
+  timeout: 30
+  bulk_max_size: 2048
+
+# ---- Logging ----------------------------------------------------------------
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: C:\ProgramData\winlogbeat\logs
+  name: winlogbeat
+  keepfiles: 7
+  permissions: 0640
+
+# ---- Metadata ---------------------------------------------------------------
+name: "DC01-WinLogBeat"
+tags: ["windows", "dc", "winlogbeat"]
+
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded

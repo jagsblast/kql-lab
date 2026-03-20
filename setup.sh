@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────────────────────
+# setup.sh — Idempotent setup for Windows Event Log → Kustainer pipeline
+#
+# What it does:
+#   1. Migrates a standalone 'adx' container to docker-compose management
+#   2. Starts ADX + Logstash via docker compose
+#   3. Waits for Kustainer to be healthy
+#   4. Creates database, table, JSON mapping, and streaming ingest policy
+#   5. Sends a test event to verify end-to-end ingest works
+#
+# Re-run safely at any time — all schema commands are idempotent.
+# ──────────────────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ADX_URL="http://localhost:8080"
+DB="NetDefaultDB"
+MAX_WAIT=180
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+log()  { echo -e "${GREEN}[setup]${NC} $*"; }
+warn() { echo -e "${YELLOW}[ warn]${NC} $*"; }
+info() { echo -e "${CYAN}[ info]${NC} $*"; }
+fail() { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  Windows Event Logs → Kustainer — Setup${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# ── 0. Pre-flight ─────────────────────────────────────────────────────────────
+command -v docker  >/dev/null 2>&1 || fail "docker not found in PATH"
+docker compose version >/dev/null 2>&1 || fail "'docker compose' plugin not found (need Docker 20.10+)"
+command -v python3 >/dev/null 2>&1 || fail "python3 not found (needed for schema init)"
+command -v curl    >/dev/null 2>&1 || fail "curl not found"
+
+cd "$SCRIPT_DIR"
+
+# ── 1. Migrate standalone adx container to docker-compose ────────────────────
+COMPOSE_LABEL=$(docker inspect adx --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)
+RUNNING=$(docker ps -q --filter name=^/adx$ 2>/dev/null || true)
+
+if [[ -n "$RUNNING" && -z "$COMPOSE_LABEL" ]]; then
+    warn "Found standalone 'adx' container — migrating to docker-compose management."
+    warn "Your data in ./data/ is preserved."
+    docker stop adx >/dev/null
+    docker rm   adx >/dev/null
+    log "Standalone container removed."
+fi
+
+# ── 2. Ensure required directories exist ─────────────────────────────────────
+log "Ensuring directory layout ..."
+mkdir -p data logstash/pipeline logstash/config winlogbeat schemas
+
+# ── 3. Start the stack ────────────────────────────────────────────────────────
+log "Starting ADX + Logstash via docker compose ..."
+docker compose up -d
+echo ""
+
+# ── 4. Wait for Kustainer ────────────────────────────────────────────────────
+log "Waiting for Kustainer to become healthy (max ${MAX_WAIT}s) ..."
+ELAPSED=0
+until curl -sf -X POST "${ADX_URL}/v1/rest/mgmt" \
+        -H "Content-Type: application/json" \
+        -d '{"db":"NetDefaultDB","csl":".show version"}' \
+        -o /dev/null 2>/dev/null; do
+    if (( ELAPSED >= MAX_WAIT )); then
+        fail "Kustainer did not become ready within ${MAX_WAIT}s. Check: docker logs adx"
+    fi
+    sleep 5
+    ELAPSED=$(( ELAPSED + 5 ))
+    echo -n "."
+done
+echo ""
+log "Kustainer is ready."
+echo ""
+
+# ── 5. Initialise schema (idempotent Python block) ────────────────────────────
+log "Initialising schema in Kustainer ..."
+
+python3 - <<'PYEOF'
+import sys, json
+
+try:
+    import urllib.request, urllib.error
+except ImportError:
+    print("ERROR: urllib not available", file=sys.stderr)
+    sys.exit(1)
+
+BASE = "http://localhost:8080"
+DB   = "NetDefaultDB"
+
+def mgmt(db, csl, label=""):
+    body = json.dumps({"db": db, "csl": csl}).encode()
+    req  = urllib.request.Request(
+        f"{BASE}/v1/rest/mgmt",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+            if label:
+                print(f"  ✓  {label}")
+            return result
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode(errors="replace")
+        if any(x in msg.lower() for x in ["already exists", "entityalreadyexists", "alreadyexists"]):
+            if label:
+                print(f"  ✓  {label} (already exists)")
+            return {}
+        print(f"  ✗  {label}: HTTP {e.code} — {msg[:300]}", file=sys.stderr)
+        raise
+
+# 1. Table (create-merge = idempotent; adds columns if schema changes)
+mgmt(DB,
+     ".create-merge table WindowsEvents "
+     "( TimeCreated:datetime, Computer:string, EventId:int, Level:string,"
+     "  Channel:string, Provider:string, Message:string,"
+     "  EventData:dynamic, RawEvent:dynamic )",
+     "table     WindowsEvents")
+
+# 2. JSON ingestion mapping (WinLogBeat 8.x field paths)
+# NOTE: $["@timestamp"] uses double-quote bracket notation because Kustainer
+# strips the quotes from single-quote bracket notation, e.g. $['x'] → $[x].
+# json.dumps encodes " as \" in the JSON text; the KQL verbatim string
+# @'...' passes backslashes through as literals, so JSON stays valid.
+mapping = json.dumps([
+    {"column": "TimeCreated", "path": '$["@timestamp"]',     "datatype": "datetime"},
+    {"column": "Computer",    "path": "$.winlog.computer_name","datatype": "string"  },
+    {"column": "EventId",     "path": "$.winlog.event_id",     "datatype": "int"     },
+    {"column": "Level",       "path": "$.log.level",           "datatype": "string"  },
+    {"column": "Channel",     "path": "$.winlog.channel",      "datatype": "string"  },
+    {"column": "Provider",    "path": "$.winlog.provider_name","datatype": "string"  },
+    {"column": "Message",     "path": "$.message",             "datatype": "string"  },
+    {"column": "EventData",   "path": "$.winlog.event_data",   "datatype": "dynamic" },
+    {"column": "RawEvent",    "path": "$",                     "datatype": "dynamic" },
+])
+# KQL verbatim @'...' string: only '' escapes single quote; \ passes as-is
+kql_mapping = mapping.replace("'", "''")
+csl = (
+    f'.create-or-alter table WindowsEvents '
+    f'ingestion json mapping "winlogbeat_mapping" @\'{kql_mapping}\''
+)
+mgmt(DB, csl, "mapping   winlogbeat_mapping")
+
+# 3. Streaming ingestion policy (required for /v1/rest/ingest endpoint)
+mgmt(DB,
+     ".alter table WindowsEvents policy streamingingestion enable",
+     "policy    streaming ingestion → WindowsEvents")
+
+print("")
+print("  Schema initialisation complete.")
+PYEOF
+
+echo ""
+
+# ── 6. Test ingest via relay ─────────────────────────────────────────────────
+log "Testing ingest via relay container ..."
+# Give relay a moment to start and connect to ADX
+sleep 3
+TEST_EVENT='{"@timestamp":"2026-03-20T00:00:00.000Z","winlog":{"computer_name":"setup-test","event_id":1,"channel":"SetupTest","provider_name":"KQL-Lab-Setup","event_data":{"note":"setup verification"}},"log":{"level":"information"},"message":"Setup verification event — safe to delete"}'
+
+HTTP_CODE=$(curl -s -o /tmp/relay_test.json -w "%{http_code}" \
+    -X POST "http://localhost:9001/ingest" \
+    -H "Content-Type: application/json" \
+    --data-binary "$TEST_EVENT")
+
+if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "204" ]]; then
+    log "Relay ingest test PASSED (HTTP ${HTTP_CODE})."
+else
+    warn "Relay returned HTTP ${HTTP_CODE}. Response: $(cat /tmp/relay_test.json 2>/dev/null || echo '(empty)')"
+    warn "Check: docker logs relay"
+fi
+
+echo ""
+
+# ── 7. Package winlogbeat folder for copy to DC ─────────────────────────────
+log "Packaging winlogbeat-dc.zip ..."
+cd "$SCRIPT_DIR"
+zip -q -r winlogbeat-dc.zip winlogbeat/
+log "winlogbeat-dc.zip ready — copy this to your Windows DC."
+echo ""
+
+# ── 8. Summary ────────────────────────────────────────────────────────────────
+HOST_IP=$(hostname -I | awk '{print $2}')   # prefer the LAN IP (second entry)
+[[ -z "$HOST_IP" ]] && HOST_IP=$(hostname -I | awk '{print $1}')
+
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║              Setup Complete                                      ║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC}  Kustainer REST API   http://localhost:8080                      ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Logstash Beats port  ${HOST_IP}:5044  (WinLogBeat target)        ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Database             NetDefaultDB                               ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Table                WindowsEvents                             ${GREEN}║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC}  Windows DC steps (run as Administrator):                        ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   1.  Copy winlogbeat-dc.zip to the DC and extract it            ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   2.  Run:  .\\install-winlogbeat.ps1 -LogstashHost ${HOST_IP}   ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   3.  Wait ~30 s, then in Kustainer:                            ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}         WindowsEvents | take 10                                 ${GREEN}║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC}  Useful commands:                                               ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   docker logs -f logstash   — watch Logstash output             ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   docker logs -f adx        — watch Kustainer output            ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   ./teardown.sh             — stop the stack                    ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}   ./teardown.sh --purge     — stop + wipe all ingested data     ${GREEN}║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════╝${NC}"
+echo ""
