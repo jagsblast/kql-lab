@@ -1,6 +1,7 @@
 # kql-lab
 
 A self-contained lab for practising KQL (Kusto Query Language) against real Windows event logs.
+<img width="2163" height="652" alt="image" src="https://github.com/user-attachments/assets/56d66eda-6a34-4bf9-9fd8-7093adcb96d5" />
 
 ```
 Windows DC (WinLogBeat)
