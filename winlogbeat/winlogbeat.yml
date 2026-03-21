@@ -102,10 +102,11 @@ winlogbeat.event_logs:
   # ---- Windows Defender / Antimalware --------------------------------------
   - name: "Microsoft-Windows-Windows Defender/Operational"
     ignore_older: 72h
-    event_id: >
-      1006, 1007, 1008, 1009, 1010,
+    event_id: >-
+      1006, 1007, 1008, 1009, 1010, 1013,
       1116, 1117, 1118, 1119, 1120,
-      2001, 2003, 2004, 5001, 5004, 5008, 5010, 5012
+      2001, 2002, 2003, 2004,
+      5001, 5004, 5007, 5008, 5010, 5012
 
   # ---- PowerShell logging ---------------------------------------------------
   # Requires script block logging (enabled by install-winlogbeat.ps1)
@@ -199,6 +200,80 @@ winlogbeat.event_logs:
   # ---- Sysmon (if installed on the DC) --------------------------------------
   - name: Microsoft-Windows-Sysmon/Operational
     ignore_older: 72h
+
+  # ---- RDP / Terminal Services -----------------------------------------------
+  # 21/23/24/25: logon, logoff, disconnect, reconnect — session duration windowing
+  - name: "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
+    ignore_older: 72h
+    event_id: 21, 22, 23, 24, 25, 39, 40
+
+  # Inbound network-level auth — includes source username and domain
+  - name: "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
+    ignore_older: 72h
+    event_id: 1149, 261
+
+  # Source IP attribution for inbound RDP; connection failures — critical for brute-force detection
+  - name: "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
+    ignore_older: 72h
+    event_id: 131, 140
+
+  # Outbound RDP from this host — pivot detection; compromised admin workstation activity
+  - name: "Microsoft-Windows-TerminalServices-RDPClient/Operational"
+    ignore_older: 72h
+    event_id: 1024, 1025, 1026, 1027, 1028
+
+  # ---- SMB Server & Client Security ------------------------------------------
+  # Executable/payload writes to admin shares (PsExec staging); lateral movement patterns
+  # Both channels are disabled by default — enabled by install-winlogbeat.ps1
+  - name: "Microsoft-Windows-SmbServer/Security"
+    ignore_older: 72h
+
+  # Outbound SMB from this host — lateral movement initiation tracking
+  - name: "Microsoft-Windows-SmbClient/Security"
+    ignore_older: 72h
+
+  # ---- BITS Client -----------------------------------------------------------
+  # Background Intelligent Transfer Service: stealth C2 payload downloads
+  # 3=job created, 59=transfer, 60=complete, 4/5=error
+  - name: "Microsoft-Windows-Bits-Client/Operational"
+    ignore_older: 72h
+    event_id: 3, 4, 5, 59, 60, 61
+
+  # ---- Group Policy Operational ----------------------------------------------
+  # GPO startup/logon script deployment; SYSVOL write context; policy tampering
+  - name: "Microsoft-Windows-GroupPolicy/Operational"
+    ignore_older: 72h
+
+  # ---- Authentication Policy (DC-specific channels) --------------------------
+  # Protected Users credential failures — high-value account spray/brute-force detection
+  - name: "Microsoft-Windows-Authentication/ProtectedUser-Client"
+    ignore_older: 72h
+  - name: "Microsoft-Windows-Authentication/ProtectedUserFailures-DomainController"
+    ignore_older: 72h
+  - name: "Microsoft-Windows-Authentication/ProtectedUserSuccesses-DomainController"
+    ignore_older: 72h
+  # Auth policy silo violations (Privileged Access Workstation / tier enforcement)
+  - name: "Microsoft-Windows-Authentication/AuthenticationPolicyFailures-DomainController"
+    ignore_older: 72h
+
+  # ---- AppCompat Shim Engine --------------------------------------------------
+  # Shim database installs = AppCompat shim persistence; UAC bypass; IFEO-style hijack
+  - name: "Microsoft-Windows-Kernel-ShimEngine/Operational"
+    ignore_older: 72h
+
+  # ---- Windows Update Client --------------------------------------------------
+  # Patch suppression; update service disruption; vulnerability preservation
+  # 20=installed, 24/25=download, 31/34/35=failure
+  - name: "Microsoft-Windows-WindowsUpdateClient/Operational"
+    ignore_older: 72h
+    event_id: 20, 24, 25, 31, 34, 35
+
+  # ---- Print Service ----------------------------------------------------------
+  # Print Nightmare (CVE-2021-34527); spooler DLL injection; spooler-initiated lateral movement
+  # 307=print job, 316=driver install, 808=plug-in/DLL load by spooler
+  - name: "Microsoft-Windows-PrintService/Operational"
+    ignore_older: 72h
+    event_id: 307, 316, 808, 810, 811
 
 # ---- Output -> Logstash (Beats protocol) ------------------------------------
 output.logstash:

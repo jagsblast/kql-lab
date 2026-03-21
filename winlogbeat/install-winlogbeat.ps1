@@ -200,7 +200,30 @@ $logsToEnable = @(
     # AppLocker packaged app execution
     "Microsoft-Windows-AppLocker/Packaged app-Execution",
     # PowerShell PSSession events (8193/8194/8197) — PSRemoting lateral movement
-    "Microsoft-Windows-PowerShell/Operational"
+    "Microsoft-Windows-PowerShell/Operational",
+    # RDP channels — session auth/logon/disconnect and source IP attribution (several disabled by default)
+    "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
+    "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
+    "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational",
+    "Microsoft-Windows-TerminalServices-RDPClient/Operational",
+    # SMB server/client security — admin share access, payload write patterns
+    "Microsoft-Windows-SmbServer/Security",
+    "Microsoft-Windows-SmbClient/Security",
+    # BITS Client — stealth payload downloads and C2 fetch via background service
+    "Microsoft-Windows-Bits-Client/Operational",
+    # Group Policy — GPO startup script deployment, policy tampering
+    "Microsoft-Windows-GroupPolicy/Operational",
+    # Authentication policy — Protected Users failures; PAW/tier silo violations (DC-only)
+    "Microsoft-Windows-Authentication/ProtectedUser-Client",
+    "Microsoft-Windows-Authentication/ProtectedUserFailures-DomainController",
+    "Microsoft-Windows-Authentication/ProtectedUserSuccesses-DomainController",
+    "Microsoft-Windows-Authentication/AuthenticationPolicyFailures-DomainController",
+    # AppCompat shim engine — shim persistence, UAC bypass via shimming
+    "Microsoft-Windows-Kernel-ShimEngine/Operational",
+    # Windows Update — patch suppression and servicing abuse context
+    "Microsoft-Windows-WindowsUpdateClient/Operational",
+    # Print Service — Print Nightmare (CVE-2021-34527), spooler exploitation
+    "Microsoft-Windows-PrintService/Operational"
 )
 foreach ($log in $logsToEnable) {
     try {
@@ -358,6 +381,14 @@ if ($svc.Status -eq "Running") {
     Write-Host "    CAPI2/Operational   - PKI chain builds and private key access"
     Write-Host "    Kernel-General      - clock manipulation events"
     Write-Host "    Kernel-PnP          - USB/hardware device installation"
+    Write-Host "    RDP (4 channels)    - session logon/disconnect/reconnect + source IP attribution"
+    Write-Host "    SMB Server/Client   - admin share access and payload write patterns"
+    Write-Host "    BITS-Client         - stealth payload downloads, C2 fetch via background service"
+    Write-Host "    GroupPolicy         - GPO startup/logon scripts, policy tampering indicators"
+    Write-Host "    Auth Policy (4ch)   - Protected Users failures; PAW silo violations"
+    Write-Host "    Kernel-ShimEngine   - AppCompat shim persistence and UAC bypass"
+    Write-Host "    WindowsUpdateClient - patch suppression and servicing abuse"
+    Write-Host "    PrintService        - Print Nightmare / spooler exploitation"
     Write-Host ""
     Write-Host "  NOTE: A reboot or 'gpupdate /force' is recommended to ensure" -ForegroundColor Yellow
     Write-Host "        all Group Policy audit settings take full effect." -ForegroundColor Yellow
