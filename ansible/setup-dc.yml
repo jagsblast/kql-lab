@@ -267,5 +267,37 @@
           - "SPNs on svc_sql:"
           - "  MSSQLSvc/sql01.{{ domain_name }}"
           - "  MSSQLSvc/sql01.{{ domain_name }}:1433"
-          - ""
-          - "Next: run install-winlogbeat.ps1 to ship events to logstash."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 3 — Install WinLogBeat and wire it to Logstash
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Phase 3 — Install WinLogBeat on the Domain Controller
+  hosts: dc
+  gather_facts: false
+
+  tasks:
+    # Copy both files the installer needs up to the DC.
+    - name: "[3a] Upload install-winlogbeat.ps1 to DC"
+      ansible.windows.win_copy:
+        src:  "{{ playbook_dir }}/../winlogbeat/install-winlogbeat.ps1"
+        dest: 'C:\winlogbeat-setup\install-winlogbeat.ps1'
+
+    - name: "[3a] Upload winlogbeat.yml to DC"
+      ansible.windows.win_copy:
+        src:  "{{ playbook_dir }}/../winlogbeat/winlogbeat.yml"
+        dest: 'C:\winlogbeat-setup\winlogbeat.yml'
+
+    # Run the installer.  -LogstashHost is pulled from group_vars so you only
+    # ever need to change it in one place.
+    - name: "[3b] Run install-winlogbeat.ps1"
+      ansible.windows.win_shell: |
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        C:\winlogbeat-setup\install-winlogbeat.ps1 -LogstashHost "{{ logstash_host }}"
+      args:
+        executable: powershell
+      register: winlogbeat_result
+
+    - name: "[3b] Show WinLogBeat installer output"
+      ansible.builtin.debug:
+        var: winlogbeat_result.stdout_lines

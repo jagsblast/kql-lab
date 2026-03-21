@@ -82,8 +82,9 @@ chmod +x setup.sh teardown.sh
 2. Wait for Kustainer to become healthy
 3. Create the `WindowsEvents` table, JSON ingestion mapping, and streaming policy
 4. Send a test event end-to-end to confirm the pipeline works
-5. Package `winlogbeat/` into `winlogbeat-dc.zip` for easy copy to the DC
-6. Print the next steps
+5. Package `winlogbeat/` into `winlogbeat-dc.zip` (manual fallback)
+6. **If Ansible is installed and `ansible/inventory.ini` has a DC IP set**, prompt you to run the full DC provisioning playbook right now — this promotes the DC, configures all lab objects, and installs WinLogBeat in one go
+7. Print the summary
 
 At the end you will see something like:
 
@@ -195,11 +196,14 @@ ansible-galaxy collection install -r ansible/requirements.yml
 
 ### Step 5 — Run the playbook
 
+You can either let `./setup.sh` run it for you (it will ask at the end), or
+trigger it manually at any time:
+
 ```bash
 ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml
 ```
 
-The playbook will automatically:
+The playbook runs three phases automatically:
 
 | Step | What happens |
 |------|--------------|
@@ -213,10 +217,12 @@ The playbook will automatically:
 | 2e | Relax the domain password policy (allows simple lab passwords) |
 | 2f–g | Configure DNS forwarders + reverse zone |
 | 2h–k | Open firewall rules, enable WinRM, disable IE ESC, disable domain firewall |
+| 3a | Copy `install-winlogbeat.ps1` and `winlogbeat.yml` to the DC |
+| 3b | Run the WinLogBeat installer — downloads, configures, and starts the service |
 
-The whole run takes about **5–10 minutes** (most of that is the DC promotion reboot).
-You can leave it running and come back — it will reconnect automatically after
-the reboot.
+The whole run takes about **5–10 minutes** (most of that is the DC promotion
+reboot). You can leave it running and come back — Ansible reconnects
+automatically after the reboot.
 
 When it finishes you'll see:
 
@@ -226,34 +232,30 @@ Domain : insane.local (INSANE)
 ...
 ```
 
----
-
-### Step 6 — Install WinLogBeat on the DC
-
-After `./setup.sh` completes on your Linux machine, a file `winlogbeat-dc.zip`
-will be in the project root. Copy it to the Windows DC and run as Administrator:
-
-```powershell
-# On the DC — expand the zip, then:
-Set-ExecutionPolicy Bypass -Scope Process -Force
-cd winlogbeat
-.\install-winlogbeat.ps1 -LogstashHost <YOUR_LINUX_IP>
-```
-
-Replace `<YOUR_LINUX_IP>` with the IP of your Linux machine (the one running Docker).
-
-The installer:
-- Downloads and installs WinLogBeat 8.17
-- Deploys `winlogbeat.yml` pointed at your Logstash instance
-- Applies all required audit policies and Group Policy registry keys
-- Sets DCSync-detection SACLs on the domain root (for event 4662)
-- Registers and starts the WinLogBeat Windows service
-
-After ~30 seconds, events should appear in Kustainer:
+After ~30 seconds, events should be flowing into Kustainer:
 
 ```kql
 WindowsEvents | take 10
 ```
+
+---
+
+### Step 6 — Done
+
+If the Ansible playbook completed successfully, WinLogBeat is already installed
+and running. You don't need to do anything else on the DC.
+
+> **Manual fallback** (if you skipped Ansible or want to reinstall WinLogBeat
+> by hand): `setup.sh` creates `winlogbeat-dc.zip` in the project root. Copy
+> it to the DC, extract it, then run in an **Administrator** PowerShell:
+>
+> ```powershell
+> Set-ExecutionPolicy Bypass -Scope Process -Force
+> cd winlogbeat
+> .\install-winlogbeat.ps1 -LogstashHost <YOUR_LINUX_IP>
+> ```
+>
+> Replace `<YOUR_LINUX_IP>` with the IP of your Linux machine.
 
 ---
 
@@ -271,8 +273,14 @@ WindowsEvents | take 10
 ```
 .
 ├── docker-compose.yml          # ADX + Logstash + relay
-├── setup.sh                    # one-shot idempotent setup
+├── setup.sh                    # one-shot idempotent setup (offers Ansible DC provisioning)
 ├── teardown.sh                 # stop / purge
+│
+├── ansible/
+│   ├── setup-dc.yml            # playbook: rename → promote DC → lab objects → WinLogBeat
+│   ├── inventory.ini           # put your Windows Server IP here
+│   ├── group_vars/dc.yml       # domain, passwords, users, SPNs — all tunable vars
+│   └── requirements.yml        # ansible.windows + microsoft.ad collections
 │
 ├── relay/
 │   ├── Dockerfile
@@ -290,8 +298,9 @@ WindowsEvents | take 10
 │   └── kerberoasting_rc4_baseline.kql  # single-event RC4 detector (no thresholds)
 │
 └── winlogbeat/
-    ├── winlogbeat.yml           # shipped to the DC; collector config
-    └── install-winlogbeat.ps1  # DC installer + audit policy script
+    ├── winlogbeat.yml           # collector config (deployed to DC by Ansible)
+    ├── install-winlogbeat.ps1  # DC installer + audit policy script (run by Ansible)
+    └── setup-dc.ps1            # PowerShell fallback (reference only)
 ```
 
 ---

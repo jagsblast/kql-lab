@@ -234,7 +234,49 @@ zip -q -r winlogbeat-dc.zip winlogbeat/
 log "winlogbeat-dc.zip ready — copy this to your Windows DC."
 echo ""
 
-# ── 8. Summary ────────────────────────────────────────────────────────────────
+# ── 8. Provision DC via Ansible (optional — skipped if not configured) ───────
+INVENTORY="$SCRIPT_DIR/ansible/inventory.ini"
+PLAYBOOK="$SCRIPT_DIR/ansible/setup-dc.yml"
+
+_ansible_ready=false
+if command -v ansible-playbook >/dev/null 2>&1 && \
+   command -v python3 >/dev/null 2>&1 && \
+   python3 -c "import winrm" >/dev/null 2>&1; then
+    _ansible_ready=true
+fi
+
+if [[ "$_ansible_ready" == "true" ]] && grep -qE '^\s*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$INVENTORY" 2>/dev/null; then
+    echo -e "${CYAN}──────────────────────────────────────────────────────────────────${NC}"
+    info "Ansible + WinRM found and ansible/inventory.ini has a DC IP configured."
+    info "This will: promote the DC, create lab users/SPNs, and install WinLogBeat."
+    echo ""
+    read -r -p "  Run Ansible DC provisioning now? [y/N] " _ans
+    echo ""
+    if [[ "${_ans,,}" == "y" ]]; then
+        log "Running: ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml"
+        echo ""
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" || \
+            warn "Ansible run finished with errors — check output above."
+    else
+        info "Skipped. Run manually later:"
+        info "  ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml"
+    fi
+    echo ""
+else
+    if [[ "$_ansible_ready" == "false" ]]; then
+        info "Ansible/pywinrm not installed — skipping DC provisioning."
+        info "To provision later:  pip3 install ansible pywinrm"
+        info "                     ansible-galaxy collection install -r ansible/requirements.yml"
+        info "                     ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml"
+    else
+        info "No DC IP set in ansible/inventory.ini — skipping DC provisioning."
+        info "Edit ansible/inventory.ini with your Windows Server IP and re-run, or run:"
+        info "  ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml"
+    fi
+    echo ""
+fi
+
+# ── 9. Summary ────────────────────────────────────────────────────────────────
 HOST_IP=$(hostname -I | awk '{print $2}')   # prefer the LAN IP (second entry)
 [[ -z "$HOST_IP" ]] && HOST_IP=$(hostname -I | awk '{print $1}')
 
