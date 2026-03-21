@@ -1,156 +1,54 @@
-// ══════════════════════════════════════════════════════════════════════════════
-// BloodHound / AD Enumeration Detection
-//
-// BloodHound's Python collector (-c All) generates this observable pattern:
-//
-//   Event  Type  Meaning
-//   ─────  ────  ────────────────────────────────────────────────────────────
-//   4648   —     Explicit credential use (BH supplies -u/-p creds to LDAP)
-//   4624   3     Network logons: each LDAP query batch creates a new session
-//   4624   10    RemoteInteractive: Kerberos channel for TGT acquisition
-//   4625   3     Failed logon: fired on first attempt if clock skew > 5 min
-//   4769   —     LDAP/GC SPN ticket (only if Kerberos succeeds; NTLM = absent)
-//
-// Observed lab footprint (bloodhound-python -u vagrant -p vagrant -c All):
-//   Source 192.168.68.59, all within 7 seconds:
-//     05:09:37 – 4624 type 3  (NTLM LDAP bind #1)
-//     05:09:38 – 4624 type 3  (NTLM LDAP bind #2, computer enumeration)
-//     05:09:43 – 4624 type 10 (Kerberos session)
-//     05:09:xx – 4648         (explicit cred logon)
-//     05:09:xx – 4625         (pre-clocksync failure)
-//
-// Three tiers:
-//   Tier 1 — LDAP logon burst: ≥2 type-3 logons from same external IP/60s
-//   Tier 2 — Explicit credential co-occurrence: 4648 + burst from same IP
-//   Tier 3 — LDAP SPN ticket: 4769 for ldap/gc SPN (Kerberos path only)
-//
-// Score ≥ 30  → LOW    (burst alone, could be legitimate app)
-// Score ≥ 55  → MEDIUM (burst + explicit creds)
-// Score ≥ 75  → HIGH   (burst + explicit creds + LDAP Kerberos ticket)
-// ══════════════════════════════════════════════════════════════════════════════
+// BloodHound / LDAP Enumeration Detection
+// Signals: rapid network logons (4624 type 3) from an external IP, with
+// explicit credential use (4648) — the bloodhound-python -u/-p fingerprint.
+// Validated against lab run: 3 logons in 6s from 192.168.68.59, 1x 4648.
 
-let lookback     = 2h;
-let burst_window = 1m;    // sliding bucket size
-let min_logons   = 2;     // ≥2 type-3 logons per window triggers Tier 1
-let loopback     = dynamic(["::1", "127.0.0.1", "0.0.0.0", "-"]);
+let lookback = 1d;
+let loopback = dynamic(["::1", "127.0.0.1", "0.0.0.0", "-"]);
 
-// ── Tier 1: LDAP bind burst (4624 type 3 / type 10) ─────────────────────────
-// Each LDAP query batch logged by bloodhound-python creates a new session;
-// 2+ from the same external IP within a minute is highly unusual.
-let ldap_burst =
+// Network logon bursts: >=2 type-3 logons from same external IP within 60s
+let bursts =
     WindowsEvents
     | where TimeCreated > ago(lookback)
     | where EventId == 4624
     | extend
-        LogonType  = tostring(EventData.LogonType),
-        TargetUser = tostring(EventData.TargetUserName),
-        SrcIP      = tostring(EventData.IpAddress),
-        AuthPkg    = tostring(EventData.AuthenticationPackageName)
+        LogonType = tostring(EventData.LogonType),
+        User      = tostring(EventData.TargetUserName),
+        SrcIP     = tostring(EventData.IpAddress),
+        AuthPkg   = tostring(EventData.AuthenticationPackageName)
     | where LogonType in ("3", "10")
     | where SrcIP !in (loopback)
-    | where TargetUser !endswith "$"
-    | where TargetUser !contains "ANONYMOUS LOGON"
+    | where User !endswith "$" and User !contains "ANONYMOUS"
     | summarize
-        logon_count  = count(),
-        logon_types  = make_set(LogonType),
-        auth_pkgs    = make_set(AuthPkg),
-        users        = make_set(TargetUser),
-        first_seen   = min(TimeCreated),
-        last_seen    = max(TimeCreated)
-        by SrcIP, bin(TimeCreated, burst_window)
-    | where logon_count >= min_logons
-    | extend burst_secs = datetime_diff('second', last_seen, first_seen)
-    | project first_seen, last_seen, burst_secs, SrcIP,
-              logon_count, logon_types, auth_pkgs, users;
+        logon_count = count(),
+        logon_types = make_set(LogonType),
+        auth_pkgs   = make_set(AuthPkg),
+        accounts    = make_set(User),
+        first_seen  = min(TimeCreated),
+        last_seen   = max(TimeCreated)
+        by SrcIP, bin(TimeCreated, 1m)
+    | where logon_count >= 2
+    | extend burst_span_secs = datetime_diff('second', last_seen, first_seen);
 
-// ── Tier 2: Explicit credential use (4648) ──────────────────────────────────
-// bloodhound-python explicitly supplies credentials (-u / -p).
-// 4648 fires on the *requesting* endpoint; on a DC it fires when an account
-// authenticates to LDAP using provided credentials rather than a session token.
+// Explicit credential use from same source (bloodhound-python supplies -u/-p)
 let explicit_creds =
     WindowsEvents
     | where TimeCreated > ago(lookback)
     | where EventId == 4648
-    | extend
-        SrcIP       = tostring(EventData.IpAddress),
-        TargetUser  = tostring(EventData.TargetUserName),
-        TargetSrv   = tostring(EventData.TargetServerName)
-    | where SrcIP !in (loopback)
-    | summarize
-        explicit_count = count(),
-        target_servers = make_set(TargetSrv),
-        expl_users     = make_set(TargetUser)
-        by SrcIP;
-
-// ── Tier 3: LDAP / GC Kerberos service ticket (4769) ────────────────────────
-// When BH uses Kerberos (not NTLM fallback), it requests a TGS for
-// ldap/<dc> or gc/<forest-root> before binding. This does not fire on NTLM.
-let ldap_kerberos =
-    WindowsEvents
-    | where TimeCreated > ago(lookback)
-    | where EventId == 4769
-    | extend
-        SvcName    = tostring(EventData.ServiceName),
-        SrcIP      = tostring(EventData.IpAddress),
-        TargetUser = tostring(EventData.TargetUserName),
-        EncType    = tostring(EventData.TicketEncryptionType)
-    | where SvcName startswith "ldap/" or SvcName startswith "gc/"
-    | where SrcIP !in (loopback)
-    | summarize
-        ldap_tgs_count = count(),
-        ldap_svcs      = make_set(SvcName),
-        ldap_enctypes  = make_set(EncType),
-        ldap_users     = make_set(TargetUser)
-        by SrcIP;
-
-// ── Failed pre-auth (4625 / 4771) — corroborating signal ────────────────────
-// A failed logon immediately before a burst (clock-skew recovery,
-// wrong-password probe, or kerb pre-auth attempt) raises confidence.
-let failed_logons =
-    WindowsEvents
-    | where TimeCreated > ago(lookback)
-    | where EventId in (4625, 4771)
     | extend SrcIP = tostring(EventData.IpAddress)
     | where SrcIP !in (loopback)
-    | summarize failed_count = count() by SrcIP;
+    | summarize explicit_cred_events = count() by SrcIP;
 
-// ── Join all tiers and score ─────────────────────────────────────────────────
-ldap_burst
-| join kind=leftouter (explicit_creds)  on SrcIP
-| join kind=leftouter (ldap_kerberos)   on SrcIP
-| join kind=leftouter (failed_logons)   on SrcIP
-| extend
-    Score =
-        // Tier 1: LDAP logon burst (required baseline)
-        iff(logon_count >= min_logons,  30, 0) +
-        iff(logon_count >= 5,           10, 0) +   // higher volume = tool behaviour
-        // Tier 1a: mixed logon types in same window (type 3 + 10 = BH pattern)
-        iff(array_length(logon_types) > 1, 10, 0) +
-        // Tier 2: explicit credential supply (4648)
-        iff(isnotnull(explicit_count),  25, 0) +
-        // Tier 3: LDAP Kerberos ticket (4769 for ldap/ or gc/ SPN)
-        iff(isnotnull(ldap_tgs_count),  25, 0) +
-        // Corroborating: failed attempt before burst
-        iff(isnotnull(failed_count),     5, 0)
-| where Score >= 30
-| extend Alert = case(
-    Score >= 75, "HIGH   -- BloodHound/ADExplorer confirmed: LDAP burst + explicit creds + Kerberos TGS",
-    Score >= 55, "MEDIUM -- LDAP enumeration burst with explicit credential use",
-                 "LOW    -- Rapid network logon burst from single external source"
-)
+bursts
+| join kind=leftouter (explicit_creds) on SrcIP
 | project
-    Alert,
-    Score,
+    TimeCreated     = first_seen,
     SrcIP,
-    first_seen,
-    last_seen,
-    burst_secs,
+    accounts,
     logon_count,
+    burst_span_secs,
     logon_types,
     auth_pkgs,
-    users,
-    explicit_count,
-    ldap_tgs_count,
-    ldap_spns = ldap_svcs,
-    failed_count
-| order by Score desc, first_seen desc
+    explicit_cred_events,
+    has_explicit_creds = isnotnull(explicit_cred_events)
+| order by TimeCreated desc
