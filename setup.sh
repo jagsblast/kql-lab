@@ -70,6 +70,19 @@ fi
 command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install: sudo apt-get install python3"
 command -v curl    >/dev/null 2>&1 || fail "curl not found. Install: sudo apt-get install curl"
 
+# RAM check — Kustainer (ADX) is memory-hungry; OOM kill = exit 137 crash loop
+TOTAL_RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+TOTAL_RAM_GB=$(awk "BEGIN{printf \"%.1f\", $TOTAL_RAM_KB/1048576}")
+if awk "BEGIN{exit !($TOTAL_RAM_GB < 4)}"; then
+    fail "Only ${TOTAL_RAM_GB} GB RAM detected — Kustainer requires at least 4 GB.\n" \
+         "  The container will OOM-crash (exit 137) on this host.\n" \
+         "  Use a machine with 4 GB+ RAM (6 GB+ recommended)."
+elif awk "BEGIN{exit !($TOTAL_RAM_GB < 6)}"; then
+    warn "RAM: ${TOTAL_RAM_GB} GB — Kustainer may be slow or unstable below 6 GB."
+else
+    info "RAM: ${TOTAL_RAM_GB} GB — OK."
+fi
+
 # Disk space check — Kustainer writes aggressively; a full disk bricks the host
 FREE_KB=$(df -k "$SCRIPT_DIR" | awk 'NR==2{print $4}')
 FREE_GB=$(awk "BEGIN{printf \"%.1f\", $FREE_KB/1048576}")
