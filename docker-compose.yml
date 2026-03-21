@@ -21,6 +21,19 @@ services:
       TZ: "Europe/London"
       # Retention is enforced via KQL policy in setup.sh (DATA_RETENTION_DAYS).
       # Kustainer has no native env var for this — the policy is set at schema init.
+    # Kustainer uses mmap-heavy storage. vm.max_map_count must be >=262144 on the
+    # host (setup.sh sets this automatically). The ulimits below are defensive.
+    # seccomp:unconfined is required — libKusto.NativeInfra.so uses syscalls
+    # (e.g. memfd_create, io_uring) that Docker's default seccomp profile blocks.
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -50,7 +63,7 @@ services:
     environment:
       KUSTAINER_URL:     "http://adx:8080"
       KUSTAINER_DB:      "NetDefaultDB"
-      KUSTAINER_TABLE:   "WindowsEvents"
+      KUSTAINER_TABLE:   "WindowsEvent"
       KUSTAINER_MAPPING: "winlogbeat_mapping"
       RELAY_PORT:        "9001"
       BATCH_MAX:         "500"
