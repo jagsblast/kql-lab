@@ -177,6 +177,44 @@ wevtutil sl "Microsoft-Windows-PowerShell/Operational" /ms:104857600
 wevtutil sl "Microsoft-Windows-TaskScheduler/Operational" /ms:104857600
 wevtutil sl "Microsoft-Windows-Windows Defender/Operational" /ms:104857600
 
+# 4f-ii. Enable logs that are disabled by default on Server/DC SKUs.
+#        wevtutil sl <channel> /e:true   — enable channel
+#        wevtutil sl <channel> /ms:<bytes> — set max size
+$logsToEnable = @(
+    # DNS Client operational — outbound queries from this host (DGA, C2 beaconing)
+    "Microsoft-Windows-DNS-Client/Operational",
+    # Code Integrity / WDAC — unsigned driver/DLL blocks, BYOVD detection
+    "Microsoft-Windows-CodeIntegrity/Operational",
+    # WMI activity — remote execution, persistent WMI subscriptions
+    "Microsoft-Windows-WMI-Activity/Operational",
+    # Certificate lifecycle (user context) — ESC/shadow credential follow-on
+    "Microsoft-Windows-CertificateServicesClient-Lifecycle-User/Operational",
+    # LSA operational — SSP injection, auth anomalies (memssp)
+    "Microsoft-Windows-LSA/Operational",
+    # CAPI2 — PKI chain building, private key access, PKINIT auth
+    "Microsoft-Windows-CAPI2/Operational",
+    # Kernel time — clock manipulation (log timeline / Kerberos abuse)
+    "Microsoft-Windows-Kernel-General/Operational",
+    # PnP device config — USB hardware implants, rogue peripherals
+    "Microsoft-Windows-Kernel-PnP/Device Configuration",
+    # AppLocker packaged app execution
+    "Microsoft-Windows-AppLocker/Packaged app-Execution",
+    # PowerShell PSSession events (8193/8194/8197) — PSRemoting lateral movement
+    "Microsoft-Windows-PowerShell/Operational"
+)
+foreach ($log in $logsToEnable) {
+    try {
+        $state = (wevtutil gl "$log" 2>$null) -match 'enabled: true'
+        if (-not $state) {
+            wevtutil sl "$log" /e:true 2>&1 | Out-Null
+            Write-Host "    Enabled: $log" -ForegroundColor Green
+        }
+        wevtutil sl "$log" /ms:52428800 2>&1 | Out-Null  # 50 MB cap
+    } catch {
+        Write-Warning "Could not enable log channel: $log — $($_.Exception.Message)"
+    }
+}
+
 # 4g. Enable DNS Server debug/audit logging (if DNS role is installed)
 if (Get-WindowsFeature DNS -ErrorAction SilentlyContinue | Where-Object Installed) {
     Set-DnsServerDiagnostics -All $true -ErrorAction SilentlyContinue
@@ -312,6 +350,14 @@ if ($svc.Status -eq "Running") {
     Write-Host "    AppLocker           - blocked execution events (if policy set)"
     Write-Host "    Windows Firewall    - rule and config changes"
     Write-Host "    Sysmon              - process/network/registry detail (if installed)"
+    Write-Host "    WMI-Activity        - remote WMI execution and persistent subscriptions"
+    Write-Host "    DNS-Client          - outbound DNS queries with process context"
+    Write-Host "    CodeIntegrity       - unsigned driver/DLL blocks, BYOVD detection"
+    Write-Host "    CertLifecycle-User  - ESC/shadow credential certificate enrollment"
+    Write-Host "    LSA/Operational     - SSP injection and auth anomalies"
+    Write-Host "    CAPI2/Operational   - PKI chain builds and private key access"
+    Write-Host "    Kernel-General      - clock manipulation events"
+    Write-Host "    Kernel-PnP          - USB/hardware device installation"
     Write-Host ""
     Write-Host "  NOTE: A reboot or 'gpupdate /force' is recommended to ensure" -ForegroundColor Yellow
     Write-Host "        all Group Policy audit settings take full effect." -ForegroundColor Yellow

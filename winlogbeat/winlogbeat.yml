@@ -111,16 +111,19 @@ winlogbeat.event_logs:
   # Requires script block logging (enabled by install-winlogbeat.ps1)
   - name: "Microsoft-Windows-PowerShell/Operational"
     ignore_older: 72h
-    event_id: 4103, 4104, 4105, 4106
+    event_id: >-
+      4103, 4104, 4105, 4106,
+      8193, 8194, 8197,
+      40961, 40962, 53504
 
   - name: "Windows PowerShell"
     ignore_older: 72h
-    event_id: 400, 403, 500, 501, 600
+    event_id: 169, 400, 403, 500, 501, 600, 800
 
   # ---- Task Scheduler -------------------------------------------------------
   - name: "Microsoft-Windows-TaskScheduler/Operational"
     ignore_older: 72h
-    event_id: 106, 140, 141, 200, 201
+    event_id: 106, 107, 110, 140, 141, 142, 200, 201
 
   # ---- NTLM authentication --------------------------------------------------
   - name: "Microsoft-Windows-NTLM/Operational"
@@ -141,6 +144,57 @@ winlogbeat.event_logs:
     ignore_older: 72h
   - name: "Microsoft-Windows-AppLocker/MSI and Script"
     ignore_older: 72h
+  - name: "Microsoft-Windows-AppLocker/Packaged app-Execution"
+    ignore_older: 72h
+    event_id: 8020, 8021, 8022, 8023, 8025
+
+  # ---- WMI subscriptions & remote execution ---------------------------------
+  # 5857-5861: WMI activity, remote process creation, persistent subscriptions
+  - name: "Microsoft-Windows-WMI-Activity/Operational"
+    ignore_older: 72h
+    event_id: 5857, 5858, 5859, 5860, 5861
+
+  # ---- DNS Client (outbound queries from this host) -------------------------
+  # 3008/3020: failed + successful lookups with PID/process context
+  # Note: requires the DNS Client Operational log to be enabled:
+  #   wevtutil sl Microsoft-Windows-DNS-Client/Operational /e:true
+  # (handled by install-winlogbeat.ps1)
+  - name: "Microsoft-Windows-DNS-Client/Operational"
+    ignore_older: 72h
+    event_id: 3006, 3008, 3020
+
+  # ---- Code Integrity / WDAC -----------------------------------------------
+  # Unsigned drivers, DLLs, kernel binaries, BYOVD, App Control violations
+  - name: "Microsoft-Windows-CodeIntegrity/Operational"
+    ignore_older: 72h
+    event_id: 3001, 3002, 3003, 3004, 3010, 3023
+
+  # ---- AD CS certificate lifecycle (user context) --------------------------
+  # Shadow Credential follow-on cert enrollment; ESC path confirmation
+  - name: "Microsoft-Windows-CertificateServicesClient-Lifecycle-User/Operational"
+    ignore_older: 72h
+    event_id: 1001, 1002, 1003, 1004, 1006, 1007
+
+  # ---- LSA / authentication package ----------------------------------------
+  # SSP injection (Mimikatz memssp), auth anomalies
+  - name: "Microsoft-Windows-LSA/Operational"
+    ignore_older: 72h
+    event_id: 300
+
+  # ---- CAPI2 (crypto / PKI chain building) ----------------------------------
+  # Certificate private key access, chain builds during PKINIT / ESC auth
+  - name: "Microsoft-Windows-CAPI2/Operational"
+    ignore_older: 72h
+    event_id: 11, 70, 90
+
+  # ---- Kernel time & PnP device changes ------------------------------------
+  # Time manipulation (log/Kerberos abuse), rogue USB hardware implants
+  - name: "Microsoft-Windows-Kernel-General/Operational"
+    ignore_older: 72h
+    event_id: 12, 13
+  - name: "Microsoft-Windows-Kernel-PnP/Device Configuration"
+    ignore_older: 72h
+    event_id: 400, 410
 
   # ---- Sysmon (if installed on the DC) --------------------------------------
   - name: Microsoft-Windows-Sysmon/Operational
