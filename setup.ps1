@@ -294,7 +294,7 @@ Write-Host '  Table                WindowsEvents' -ForegroundColor Green
 Write-Host $sep -ForegroundColor Green
 Write-Host '  Windows DC steps (run as Administrator):' -ForegroundColor Green
 Write-Host '   1.  Copy winlogbeat-dc.zip to the DC and extract it' -ForegroundColor Green
-Write-Host "   2.  Run:  .\install-winlogbeat.ps1 -LogstashHost $hostIP" -ForegroundColor Green
+Write-Host "   2.  Run:  .`\install-winlogbeat.ps1 -LogstashHost $hostIP" -ForegroundColor Green
 Write-Host '   3.  Wait ~30 s, then in Kustainer:' -ForegroundColor Green
 Write-Host '         WindowsEvents | take 10' -ForegroundColor Green
 Write-Host $sep -ForegroundColor Green
