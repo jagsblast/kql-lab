@@ -40,14 +40,39 @@ echo -e "${CYAN}═════════════════════�
 echo ""
 
 # ── 0. Pre-flight ─────────────────────────────────────────────────────────────
-command -v docker  >/dev/null 2>&1 || fail "docker not found in PATH"
-docker compose version >/dev/null 2>&1 || fail "'docker compose' plugin not found (need Docker 20.10+)"
-command -v python3 >/dev/null 2>&1 || fail "python3 not found (needed for schema init)"
-command -v curl    >/dev/null 2>&1 || fail "curl not found"
+if [[ $EUID -ne 0 ]]; then
+    fail "This script must be run as root.\n  Re-run with: sudo ./setup.sh"
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    fail "docker not found. Install it: https://docs.docker.com/engine/install/"
+fi
+
+# Check Docker daemon connectivity — catches 'not in docker group' early
+if ! docker info >/dev/null 2>&1; then
+    if [[ -S /var/run/docker.sock ]]; then
+        fail "Permission denied connecting to Docker.\n" \
+             "  Your user is not in the 'docker' group. Fix with:\n" \
+             "    sudo usermod -aG docker \$USER && newgrp docker\n" \
+             "  Or re-run this script with sudo."
+    else
+        fail "Cannot connect to the Docker daemon. Is Docker running?\n" \
+             "  Try: sudo systemctl start docker"
+    fi
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+    fail "'docker compose' plugin not found (requires Docker 20.10+ with Compose V2).\n" \
+         "  Install: sudo apt-get install docker-compose-plugin  # Debian/Ubuntu\n" \
+         "          or see https://docs.docker.com/compose/install/"
+fi
+
+command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install: sudo apt-get install python3"
+command -v curl    >/dev/null 2>&1 || fail "curl not found. Install: sudo apt-get install curl"
 
 # Disk space check — Kustainer writes aggressively; a full disk bricks the host
 FREE_KB=$(df -k "$SCRIPT_DIR" | awk 'NR==2{print $4}')
-FREE_GB=$(echo "scale=1; $FREE_KB / 1048576" | bc)
+FREE_GB=$(awk "BEGIN{printf \"%.1f\", $FREE_KB/1048576}")
 if awk "BEGIN{exit !($FREE_GB < $DATA_MIN_FREE_GB)}"; then
     fail "Only ${FREE_GB} GB free — need at least ${DATA_MIN_FREE_GB} GB. Free space or reduce DATA_RETENTION_DAYS in .env."
 elif awk "BEGIN{exit !($FREE_GB < $DATA_WARN_GB)}"; then
@@ -59,7 +84,7 @@ fi
 # Data directory size check — warn if ./data/ already exceeds DATA_MAX_GB
 if [[ -d "$SCRIPT_DIR/data" ]]; then
     DATA_KB=$(du -sk "$SCRIPT_DIR/data" | awk '{print $1}')
-    DATA_GB=$(echo "scale=1; $DATA_KB / 1048576" | bc)
+    DATA_GB=$(awk "BEGIN{printf \"%.1f\", $DATA_KB/1048576}")
     if awk "BEGIN{exit !($DATA_GB > $DATA_MAX_GB)}"; then
         warn "./data/ is ${DATA_GB} GB — over the ${DATA_MAX_GB} GB cap."
         warn "Run ./trim.sh to reduce retention and reclaim space."
