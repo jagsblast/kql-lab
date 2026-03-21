@@ -12,8 +12,7 @@ datasets/
 /tmp/
 
 # ── Docker leftovers ───────────────────────────────────────────────────────────
-.env
-docker-compose.override.yml
+.env!.env.exampledocker-compose.override.yml
 
 # ── OS noise ───────────────────────────────────────────────────────────────────
 .DS_Store

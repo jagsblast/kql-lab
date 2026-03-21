@@ -26,6 +26,31 @@ Windows DC (WinLogBeat)
 
 ---
 
+## Storage limits
+
+By default `setup.sh` configures a **7-day retention policy** inside Kustainer.
+ADX automatically drops extents older than that — no manual cleanup needed.
+
+To change the retention window, copy `.env.example` to `.env` and edit:
+
+```bash
+cp .env.example .env
+# edit .env:
+DATA_RETENTION_DAYS=3   # keep only 3 days
+DATA_WARN_GB=2          # warn if < 2 GB free
+DATA_MIN_FREE_GB=1      # abort setup if < 1 GB free
+```
+
+Then re-run `./setup.sh` — it's idempotent and will update the policy in place.
+
+To check current disk usage at any time:
+
+```bash
+du -sh ./data/
+```
+
+---
+
 ## Quick start (Linux host)
 
 ```bash

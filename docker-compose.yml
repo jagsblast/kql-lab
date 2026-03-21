@@ -19,6 +19,8 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       TZ: "Europe/London"
+      # Retention is enforced via KQL policy in setup.sh (DATA_RETENTION_DAYS).
+      # Kustainer has no native env var for this — the policy is set at schema init.
     healthcheck:
       test:
         - "CMD-SHELL"

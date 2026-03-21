@@ -19,6 +19,13 @@ ADX_URL="http://localhost:8080"
 DB="NetDefaultDB"
 MAX_WAIT=180
 
+# ── Storage config (override via .env or environment) ─────────────────────────
+# Load .env if present
+[[ -f "$SCRIPT_DIR/.env" ]] && set -o allexport && source "$SCRIPT_DIR/.env" && set +o allexport
+DATA_RETENTION_DAYS="${DATA_RETENTION_DAYS:-7}"    # keep N days of events
+DATA_WARN_GB="${DATA_WARN_GB:-2}"                  # warn if free space < N GB
+DATA_MIN_FREE_GB="${DATA_MIN_FREE_GB:-1}"           # abort if free space < N GB
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[setup]${NC} $*"; }
 warn() { echo -e "${YELLOW}[ warn]${NC} $*"; }
@@ -36,6 +43,18 @@ command -v docker  >/dev/null 2>&1 || fail "docker not found in PATH"
 docker compose version >/dev/null 2>&1 || fail "'docker compose' plugin not found (need Docker 20.10+)"
 command -v python3 >/dev/null 2>&1 || fail "python3 not found (needed for schema init)"
 command -v curl    >/dev/null 2>&1 || fail "curl not found"
+
+# Disk space check — Kustainer writes aggressively; a full disk bricks the host
+FREE_KB=$(df -k "$SCRIPT_DIR" | awk 'NR==2{print $4}')
+FREE_GB=$(echo "scale=1; $FREE_KB / 1048576" | bc)
+if awk "BEGIN{exit !($FREE_GB < $DATA_MIN_FREE_GB)}"; then
+    fail "Only ${FREE_GB} GB free — need at least ${DATA_MIN_FREE_GB} GB. Free space or reduce DATA_RETENTION_DAYS in .env."
+elif awk "BEGIN{exit !($FREE_GB < $DATA_WARN_GB)}"; then
+    warn "Low disk space: ${FREE_GB} GB free (threshold: ${DATA_WARN_GB} GB). Monitor closely."
+else
+    info "Disk space OK: ${FREE_GB} GB free."
+fi
+info "Retention policy: ${DATA_RETENTION_DAYS} days (set DATA_RETENTION_DAYS in .env to change)."
 
 cd "$SCRIPT_DIR"
 
@@ -152,6 +171,22 @@ mgmt(DB, csl, "mapping   winlogbeat_mapping")
 mgmt(DB,
      ".alter table WindowsEvents policy streamingingestion enable",
      "policy    streaming ingestion → WindowsEvents")
+
+import os
+retention_days = int(os.environ.get("DATA_RETENTION_DAYS", "7"))
+cache_days     = min(retention_days, 3)   # hot cache <= retention, cap at 3d
+
+# 4. Retention policy — ADX automatically drops extents older than this.
+#    Recoverability disabled: no soft-delete tombstones wasting extra space.
+mgmt(DB,
+     f'.alter table WindowsEvents policy retention @\'{{"SoftDeletePeriod":"{retention_days}.00:00:00","Recoverability":"Disabled"}}\'',
+     f"policy    retention → {retention_days} days")
+
+# 5. Caching policy — limits how much data ADX keeps in hot (disk) cache.
+#    Data older than this is still queryable but read from cold storage.
+mgmt(DB,
+     f".alter table WindowsEvents policy caching hot = {cache_days}d",
+     f"policy    hot cache → {cache_days} days")
 
 print("")
 print("  Schema initialisation complete.")
