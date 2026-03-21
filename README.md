@@ -22,91 +22,7 @@ Windows DC (WinLogBeat)
 | Docker Compose plugin | Ships with Docker Desktop; standalone: `apt install docker-compose-plugin` |
 | `python3`, `curl` | Usually pre-installed |
 | ≥ 6 GB free RAM | Kustainer alone uses ~3 GB at rest |
-| Windows host / VM on the same network | The DC that ships event logs |
-
----
-
-## Storage limits
-
-By default `setup.sh` configures a **7-day retention policy** and a **5 GB cap** on `./data/`.
-ADX automatically drops extents older than the retention window — no manual cleanup needed.
-
-Configure both in `.env` (copy from `.env.example`):
-
-```bash
-cp .env.example .env
-```
-
-```ini
-DATA_RETENTION_DAYS=7   # drop events older than N days
-DATA_MAX_GB=5           # target cap for ./data/ directory
-DATA_WARN_GB=2          # warn in setup.sh if free disk < N GB
-DATA_MIN_FREE_GB=1      # abort setup.sh if free disk < N GB
-```
-
-**When `./data/` exceeds `DATA_MAX_GB`**, run `trim.sh`:
-
-```bash
-./trim.sh              # auto-reduce retention to fit under the cap
-./trim.sh --check      # report size only, make no changes
-./trim.sh --force 3    # force retention to exactly 3 days
-```
-
-`trim.sh` calculates a proportional new retention window, applies it to Kustainer,
-and persists it back to `.env`. ADX purges the old extents in the background (~5 min).
-
-**Cron** (check hourly, trim if needed):
-```bash
-0 * * * * /path/to/kql-lab/trim.sh >> /var/log/kql-lab-trim.log 2>&1
-```
-
-Check current disk usage:
-```bash
-du -sh ./data/
-./trim.sh --check
-```
-
----
-
-## Quick start (Linux host)
-
-```bash
-git clone https://github.com/jagsblast/kql-lab.git kql-lab
-cd kql-lab
-chmod +x setup.sh teardown.sh
-./setup.sh
-```
-
-`setup.sh` will:
-1. Start **ADX (Kustainer)**, **Logstash**, and the **relay** via Docker Compose
-2. Wait for Kustainer to become healthy
-3. Create the `WindowsEvents` table, JSON ingestion mapping, and streaming policy
-4. Send a test event end-to-end to confirm the pipeline works
-5. Package `winlogbeat/` into `winlogbeat-dc.zip` (manual fallback)
-6. **If Ansible is installed and `ansible/inventory.ini` has a DC IP set**, prompt you to run the full DC provisioning playbook right now — this promotes the DC, configures all lab objects, and installs WinLogBeat in one go
-7. Print the summary
-
-At the end you will see something like:
-
-```
-╔══════════════════════════════════════════════════════════════════╗
-║  Setup Complete                                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Kustainer REST API   http://localhost:8080                      ║
-║  Logstash Beats port  <HOST_IP>:5044  (WinLogBeat target)        ║
-╚══════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## Connecting Kusto Explorer
-
-> Download: https://aka.ms/ke
-
-1. Open **Kusto Explorer** (Windows) → **Add Connection**
-2. Cluster URI: `http://<HOST_IP>:8080`
-3. Database: `NetDefaultDB`
-4. Run any query from `queries/`
+| Windows Server VM on the same network | The DC that ships event logs — see Step 1 below |
 
 ---
 
@@ -184,20 +100,51 @@ If you don't have Ansible installed yet:
 
 ```bash
 pip3 install --user ansible pywinrm
-```
-
-Then install the required Ansible collections:
-
-```bash
 ansible-galaxy collection install -r ansible/requirements.yml
 ```
 
 ---
 
-### Step 5 — Run the playbook
+## Quick start (Linux host)
 
-You can either let `./setup.sh` run it for you (it will ask at the end), or
-trigger it manually at any time:
+```bash
+git clone https://github.com/jagsblast/kql-lab.git kql-lab
+cd kql-lab
+chmod +x setup.sh teardown.sh
+./setup.sh
+```
+
+`setup.sh` will:
+1. Start **ADX (Kustainer)**, **Logstash**, and the **relay** via Docker Compose
+2. Wait for Kustainer to become healthy
+3. Create the `WindowsEvents` table, JSON ingestion mapping, and streaming policy
+4. Send a test event end-to-end to confirm the pipeline works
+5. Package `winlogbeat/` into `winlogbeat-dc.zip` (manual fallback)
+6. **If Ansible is installed and `ansible/inventory.ini` has a DC IP set**, prompt you to run the full DC provisioning playbook right now — this promotes the DC, configures all lab objects, and installs WinLogBeat in one go
+7. Print the summary
+
+At the end you will see something like:
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║  Setup Complete                                                  ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Kustainer REST API   http://localhost:8080                      ║
+║  Logstash Beats port  <HOST_IP>:5044  (WinLogBeat target)        ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+### Step 5 — Run the Ansible playbook
+
+When `setup.sh` finishes it will ask:
+
+```
+Run Ansible DC provisioning now? [y/N]
+```
+
+Type `y` and press Enter. You can also run it manually at any time:
 
 ```bash
 ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml
@@ -256,6 +203,59 @@ and running. You don't need to do anything else on the DC.
 > ```
 >
 > Replace `<YOUR_LINUX_IP>` with the IP of your Linux machine.
+
+---
+
+## Connecting Kusto Explorer
+
+> Download: https://aka.ms/ke
+
+1. Open **Kusto Explorer** (Windows) → **Add Connection**
+2. Cluster URI: `http://<HOST_IP>:8080`
+3. Database: `NetDefaultDB`
+4. Run any query from `queries/`
+
+---
+
+## Storage limits
+
+By default `setup.sh` configures a **7-day retention policy** and a **5 GB cap** on `./data/`.
+ADX automatically drops extents older than the retention window — no manual cleanup needed.
+
+Configure both in `.env` (copy from `.env.example`):
+
+```bash
+cp .env.example .env
+```
+
+```ini
+DATA_RETENTION_DAYS=7   # drop events older than N days
+DATA_MAX_GB=5           # target cap for ./data/ directory
+DATA_WARN_GB=2          # warn in setup.sh if free disk < N GB
+DATA_MIN_FREE_GB=1      # abort setup.sh if free disk < N GB
+```
+
+**When `./data/` exceeds `DATA_MAX_GB`**, run `trim.sh`:
+
+```bash
+./trim.sh              # auto-reduce retention to fit under the cap
+./trim.sh --check      # report size only, make no changes
+./trim.sh --force 3    # force retention to exactly 3 days
+```
+
+`trim.sh` calculates a proportional new retention window, applies it to Kustainer,
+and persists it back to `.env`. ADX purges the old extents in the background (~5 min).
+
+**Cron** (check hourly, trim if needed):
+```bash
+0 * * * * /path/to/kql-lab/trim.sh >> /var/log/kql-lab-trim.log 2>&1
+```
+
+Check current disk usage:
+```bash
+du -sh ./data/
+./trim.sh --check
+```
 
 ---
 
