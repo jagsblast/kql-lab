@@ -148,13 +148,13 @@ if (Test-Path $wslConfig) {
         if ($wslContent -match '\[wsl2\]') {
             $wslContent = $wslContent -replace '(\[wsl2\])', "`$1`n$wslLine"
         } else {
-            $wslContent += "`n[wsl2]`n$wslLine`n"
+            $wslContent += "`n`[wsl2`]`n$wslLine`n"
         }
         Set-Content $wslConfig $wslContent
         info "vm.max_map_count persisted in $wslConfig."
     }
 } else {
-    "[wsl2]`n$wslLine`n" | Set-Content $wslConfig
+    "`[wsl2`]`n$wslLine`n" | Set-Content $wslConfig
     info "Created $wslConfig with vm.max_map_count=524288."
 }
 
@@ -283,24 +283,25 @@ $hostIP = (Get-NetIPAddress -AddressFamily IPv4 |
     Sort-Object InterfaceMetric |
     Select-Object -First 1).IPAddress
 
-Write-Host '╔══════════════════════════════════════════════════════════════════╗' -ForegroundColor Green
-Write-Host '║              Setup Complete                                      ║' -ForegroundColor Green
-Write-Host '╠══════════════════════════════════════════════════════════════════╣' -ForegroundColor Green
-Write-Host "║  Kustainer REST API   http://localhost:8080                      ║" -ForegroundColor Green
-Write-Host "║  Logstash Beats port  ${hostIP}:5044  (WinLogBeat target)        ║" -ForegroundColor Green
-Write-Host "║  Database             NetDefaultDB                               ║" -ForegroundColor Green
-Write-Host "║  Table                WindowsEvents                              ║" -ForegroundColor Green
-Write-Host '╠══════════════════════════════════════════════════════════════════╣' -ForegroundColor Green
-Write-Host '║  Windows DC steps (run as Administrator):                        ║' -ForegroundColor Green
-Write-Host '║   1.  Copy winlogbeat-dc.zip to the DC and extract it            ║' -ForegroundColor Green
-Write-Host "║   2.  Run:  .\install-winlogbeat.ps1 -LogstashHost $hostIP       ║" -ForegroundColor Green
-Write-Host '║   3.  Wait ~30 s, then in Kustainer:                             ║' -ForegroundColor Green
-Write-Host '║         WindowsEvents | take 10                                  ║' -ForegroundColor Green
-Write-Host '╠══════════════════════════════════════════════════════════════════╣' -ForegroundColor Green
-Write-Host '║  Useful commands:                                                ║' -ForegroundColor Green
-Write-Host '║   docker logs -f logstash   — watch Logstash output              ║' -ForegroundColor Green
-Write-Host '║   docker logs -f adx        — watch Kustainer output             ║' -ForegroundColor Green
-Write-Host '║   .\teardown.ps1            — stop the stack                     ║' -ForegroundColor Green
-Write-Host '║   .\teardown.ps1 --purge    — stop + wipe all ingested data      ║' -ForegroundColor Green
-Write-Host '╚══════════════════════════════════════════════════════════════════╝' -ForegroundColor Green
+$sep = '=' * 66
+Write-Host $sep -ForegroundColor Green
+Write-Host '  Setup Complete' -ForegroundColor Green
+Write-Host $sep -ForegroundColor Green
+Write-Host "  Kustainer REST API   http://localhost:8080" -ForegroundColor Green
+Write-Host "  Logstash Beats port  ${hostIP}:5044  (WinLogBeat target)" -ForegroundColor Green
+Write-Host '  Database             NetDefaultDB' -ForegroundColor Green
+Write-Host '  Table                WindowsEvents' -ForegroundColor Green
+Write-Host $sep -ForegroundColor Green
+Write-Host '  Windows DC steps (run as Administrator):' -ForegroundColor Green
+Write-Host '   1.  Copy winlogbeat-dc.zip to the DC and extract it' -ForegroundColor Green
+Write-Host "   2.  Run:  .\install-winlogbeat.ps1 -LogstashHost $hostIP" -ForegroundColor Green
+Write-Host '   3.  Wait ~30 s, then in Kustainer:' -ForegroundColor Green
+Write-Host '         WindowsEvents | take 10' -ForegroundColor Green
+Write-Host $sep -ForegroundColor Green
+Write-Host '  Useful commands:' -ForegroundColor Green
+Write-Host '   docker logs -f logstash   -- watch Logstash output' -ForegroundColor Green
+Write-Host '   docker logs -f adx        -- watch Kustainer output' -ForegroundColor Green
+Write-Host '   .\teardown.ps1            -- stop the stack' -ForegroundColor Green
+Write-Host '   .\teardown.ps1 --purge    -- stop + wipe all ingested data' -ForegroundColor Green
+Write-Host $sep -ForegroundColor Green
 Write-Host ''
