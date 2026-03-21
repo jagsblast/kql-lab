@@ -334,6 +334,266 @@ Write-Host "    SeSecurityPrivilege granted to SYSTEM/LocalService/NetworkServic
 gpupdate /force /target:computer 2>&1 | Select-String "successfully" | ForEach-Object { Write-Host "    $_" }
 
 # =============================================================================
+# STEP 4k - AD object SACLs for sensitive objects
+# =============================================================================
+# These SACLs cause Security 4662 / 5136 / 4670 to fire for writes to
+# high-value AD objects that would otherwise produce no events even with
+# "Directory Service Changes" audit policy enabled.
+#
+# Objects covered:
+#   AdminSDHolder      - nTSecurityDescriptor/member writes (ACL persistence T1484)
+#   krbtgt             - attribute changes (Golden Ticket prep, password manipulation)
+#   GPO policies CN    - child creation / attribute writes (GPO-based persistence T1484.001)
+#   Built-in DA group  - member adds (T1098.003) — belt-and-suspenders for 4728
+#   Domain root DACL   - WRITE_DAC audit catches 4670 (permission changes on root object)
+# =============================================================================
+Write-Host "[4/5] Setting AD object SACLs for sensitive objects ..."
+try {
+    $domainObj = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+    $domainName = $domainObj.Name
+    $domainDC   = "DC=" + ($domainName -replace "\.", ",DC=")
+
+    $everyone  = [System.Security.Principal.SecurityIdentifier]"S-1-1-0"
+    $emptyGuid = [System.Guid]"00000000-0000-0000-0000-000000000000"
+    $allProps  = [System.Guid]"00000000-0000-0000-0000-000000000000"
+
+    # Helper: open a DirectoryEntry with SACL read/write, add an audit rule, commit
+    function Add-ADAuditRule {
+        param([string]$LdapPath, [string]$Label,
+              [System.DirectoryServices.ActiveDirectoryRights]$Rights,
+              [System.Guid]$ObjectGuid = [System.Guid]"00000000-0000-0000-0000-000000000000")
+        try {
+            $de = New-Object System.DirectoryServices.DirectoryEntry($LdapPath)
+            $de.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Sacl
+            $de.psbase.RefreshCache(@("nTSecurityDescriptor"))
+            $rule = New-Object System.DirectoryServices.ActiveDirectoryAuditRule(
+                $everyone, $Rights,
+                [System.Security.AccessControl.AuditFlags]::Success,
+                $ObjectGuid,
+                [System.DirectoryServices.ActiveDirectorySecurityInheritance]::None,
+                $emptyGuid
+            )
+            $de.ObjectSecurity.AddAuditRule($rule)
+            $de.psbase.CommitChanges()
+            $de.Dispose()
+            Write-Host "    SACL set: $Label" -ForegroundColor Green
+        } catch {
+            Write-Warning "    SACL skipped ($Label): $($_.Exception.Message)"
+        }
+    }
+
+    $writeProps = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty
+    $writeDac   = [System.DirectoryServices.ActiveDirectoryRights]::WriteDacl
+    $writeAll   = $writeProps -bor $writeDac -bor
+                  [System.DirectoryServices.ActiveDirectoryRights]::WriteOwner
+
+    # AdminSDHolder — detect ACL tamper used for persistence (T1484)
+    Add-ADAuditRule "LDAP://CN=AdminSDHolder,CN=System,$domainDC" `
+        "AdminSDHolder write (ACL persistence / T1484)" $writeAll
+
+    # krbtgt — detect attribute or password manipulation (Golden Ticket prep)
+    Add-ADAuditRule "LDAP://CN=krbtgt,CN=Users,$domainDC" `
+        "krbtgt attribute write (Golden Ticket prep)" $writeAll
+
+    # GPO policies container — detect new GPO creation / GPO attribute tamper
+    Add-ADAuditRule "LDAP://CN=Policies,CN=System,$domainDC" `
+        "GPO Policies container write (T1484.001)" `
+        ($writeProps -bor [System.DirectoryServices.ActiveDirectoryRights]::CreateChild `
+                     -bor [System.DirectoryServices.ActiveDirectoryRights]::DeleteChild)
+
+    # Domain Admins group — belt-and-suspenders for 4728 member adds
+    $daName = "Domain Admins"
+    $searcher = New-Object System.DirectoryServices.DirectorySearcher
+    $searcher.Filter = "(&(objectClass=group)(cn=$daName))"
+    $searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$domainDC")
+    $daResult = $searcher.FindOne()
+    if ($daResult) {
+        Add-ADAuditRule $daResult.Path `
+            "Domain Admins member write (T1098.003)" $writeProps
+    }
+
+    # Domain root — WRITE_DAC audits 4670 (permission change on domain object)
+    $domainDE = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$domainDC")
+    $domainDE.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Sacl
+    $domainDE.psbase.RefreshCache(@("nTSecurityDescriptor"))
+    $dacRule = New-Object System.DirectoryServices.ActiveDirectoryAuditRule(
+        $everyone, $writeDac,
+        [System.Security.AccessControl.AuditFlags]::Success,
+        $emptyGuid,
+        [System.DirectoryServices.ActiveDirectorySecurityInheritance]::None,
+        $emptyGuid
+    )
+    $domainDE.ObjectSecurity.AddAuditRule($dacRule)
+    $domainDE.psbase.CommitChanges()
+    $domainDE.Dispose()
+    Write-Host "    SACL set: domain root WRITE_DAC (4670 permission change)" -ForegroundColor Green
+
+} catch {
+    Write-Warning "AD object SACL step failed: $($_.Exception.Message)"
+    Write-Warning "This step requires Domain Admin rights on a DC."
+}
+
+# =============================================================================
+# STEP 4l - File system SACLs for high-value paths (fires 4663)
+# =============================================================================
+# Required for 4663 (object access) to fire for sensitive file paths:
+#   C:\Windows\NTDS\       — NTDS.dit access = credential dumping (T1003.003)
+#   C:\Windows\SYSVOL\     — GPO/script reads = lateral prep, GPO hijack (T1484)
+#   C:\Windows\System32\config\ — SAM/SECURITY hive = offline credential theft
+# =============================================================================
+Write-Host "[4/5] Setting file system SACLs on sensitive paths ..."
+
+$fileSacls = @(
+    @{
+        Path   = "C:\Windows\NTDS"
+        Label  = "NTDS folder (NTDS.dit credential dump detection T1003.003)"
+        Rights = "Read,Write"
+        Audit  = "Success"
+    },
+    @{
+        Path   = "C:\Windows\SYSVOL"
+        Label  = "SYSVOL (GPO/script access and staging T1484, T1021.002)"
+        Rights = "Write"
+        Audit  = "Success"
+    },
+    @{
+        Path   = "C:\Windows\System32\config"
+        Label  = "SAM/SECURITY hive directory (offline credential theft T1003)"
+        Rights = "Read,Write"
+        Audit  = "Success"
+    }
+)
+
+foreach ($entry in $fileSacls) {
+    $path = $entry.Path
+    if (-not (Test-Path $path)) {
+        Write-Host "    Skipped (path not found): $path"
+        continue
+    }
+    try {
+        # icacls sets SACL via /audit switch:
+        #   /audit:S:(AU;OICINPFA;<perms>;;;WD) — WD = World/Everyone
+        # Using icacls because PowerShell's Set-Acl on directories requires
+        # loading the entire DACL first, risking inadvertent DACL changes.
+        $aceFlags = "OI CI NP FA"  # OI=object inherit, CI=container inherit, NP=no propagate, FA=full audit
+        $rights   = $entry.Rights
+        # Convert to icacls permission string
+        $permStr = switch ($rights) {
+            "Read,Write" { "(OI)(CI)(NP)(RA)" }   # Read + Write audit
+            "Write"      { "(OI)(CI)(NP)(WD)" }   # Write-only audit (quieter, avoids 4663 flood on reads)
+            default      { "(OI)(CI)(NP)(FA)" }
+        }
+        # Use auditpol-style icacls SACL syntax:
+        # /audit Everyone:<flags>  where flags = r for read, w for write
+        $icaclsFlags = switch ($rights) {
+            "Read,Write" { "R,W" }
+            "Write"      { "W"   }
+            default      { "F"   }
+        }
+        $result = icacls "$path" /grant:r "Everyone:(OI)(CI)(DE,DC,S,SD,RC,WD,WO,GA)" 2>&1
+        # Proper SACL approach via PowerShell ACL:
+        $acl  = Get-Acl -Path $path -Audit
+        $everyoneNT = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")
+        $auditRights = switch ($rights) {
+            "Read,Write" { [System.Security.AccessControl.FileSystemRights]"Read,Write" }
+            "Write"      { [System.Security.AccessControl.FileSystemRights]"Write" }
+            default      { [System.Security.AccessControl.FileSystemRights]"FullControl" }
+        }
+        $auditRule = New-Object System.Security.AccessControl.FileSystemAuditRule(
+            $everyoneNT,
+            $auditRights,
+            [System.Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit",
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AuditFlags]::Success
+        )
+        $acl.AddAuditRule($auditRule)
+        Set-Acl -Path $path -AclObject $acl
+        Write-Host "    SACL set: $($entry.Label)" -ForegroundColor Green
+    } catch {
+        Write-Warning "    SACL skipped ($path): $($_.Exception.Message)"
+    }
+}
+
+# =============================================================================
+# STEP 4m - Registry SACLs for persistence and tamper paths (fires 4657)
+# =============================================================================
+# Required for Security 4657 (registry value modified) to fire.
+# Without these SACLs, registry-based persistence and security tool tamper
+# are completely invisible in the Security log.
+#
+# Paths covered:
+#   Run/RunOnce keys       — classic persistence (T1547.001)
+#   Services key           — service-based persistence and BYOVD helper (T1543.003)
+#   IFEO                   — debugger hijack / accessibility persistence (T1546.012)
+#   LSA                    — SSP/auth package injection (T1547.005)
+#   Defender policy        — Defender config tamper via registry (T1562.001)
+#   WinLogon               — logon provider / userinit tampering (T1547.004)
+# =============================================================================
+Write-Host "[4/5] Setting registry SACLs on persistence and security-critical paths ..."
+
+# Helper: open a registry key, add an audit rule, save it back
+function Add-RegistryAuditRule {
+    param([string]$KeyPath, [string]$Label)
+    try {
+        # Split hive prefix from subkey path
+        $hive    = $KeyPath -replace '^HKLM:\\', '' -replace '^HKCU:\\', ''
+        $regKey  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+            ($KeyPath -replace '^HKLM:\\', ''),
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]::ChangePermissions
+        )
+        if ($null -eq $regKey) {
+            Write-Warning "    SACL skipped (key not found): $KeyPath"
+            return
+        }
+        $acl        = $regKey.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Audit)
+        $everyoneNT = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")
+        $auditRule  = New-Object System.Security.AccessControl.RegistryAuditRule(
+            $everyoneNT,
+            [System.Security.AccessControl.RegistryRights]"SetValue,CreateSubKey,DeleteSubKey,Delete",
+            [System.Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit",
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AuditFlags]::Success
+        )
+        $acl.AddAuditRule($auditRule)
+        $regKey.SetAccessControl($acl)
+        $regKey.Close()
+        Write-Host "    SACL set: $Label" -ForegroundColor Green
+    } catch {
+        Write-Warning "    SACL skipped ($Label): $($_.Exception.Message)"
+    }
+}
+
+$registrySacls = @(
+    @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+      "HKCU Run key (T1547.001 run-key persistence)"),
+    @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+      "HKLM RunOnce key (T1547.001 run-key persistence)"),
+    @("HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+      "HKLM WOW64 Run key (T1547.001 32-bit run-key persistence)"),
+    @("HKLM:\SYSTEM\CurrentControlSet\Services",
+      "Services key (T1543.003 service-based persistence / BYOVD)"),
+    @("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+      "IFEO (T1546.012 debugger hijack / accessibility persistence)"),
+    @("HKLM:\SYSTEM\CurrentControlSet\Control\Lsa",
+      "LSA key (T1547.005 SSP/auth package injection + Mimikatz memssp)"),
+    @("HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender",
+      "Defender policy key (T1562.001 AV tamper via registry)"),
+    @("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+      "Winlogon (T1547.004 userinit/shell/logon provider tamper)")
+)
+
+foreach ($entry in $registrySacls) {
+    $keyPath = $entry[0]
+    $label   = $entry[1]
+    if (-not (Test-Path $keyPath)) {
+        # Create the key so the SACL can be applied (e.g. Defender policy may not exist)
+        New-Item -Path $keyPath -Force | Out-Null
+    }
+    Add-RegistryAuditRule -KeyPath $keyPath -Label $label
+}
+
+# =============================================================================
 # STEP 5 - Install and start the WinLogBeat service
 # =============================================================================
 Write-Host "[5/5] Installing WinLogBeat Windows service ..."
