@@ -70,6 +70,20 @@ fi
 command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install: sudo apt-get install python3"
 command -v curl    >/dev/null 2>&1 || fail "curl not found. Install: sudo apt-get install curl"
 
+# AVX2 check — libKusto.NativeInfra.so is compiled with AVX2 instructions.
+# Without AVX2 the process is killed instantly (SIGILL/exit 137) regardless of
+# RAM or Docker config. This is a VM CPU feature passthrough issue.
+if ! grep -qw 'avx2' /proc/cpuinfo; then
+    fail "AVX2 CPU instruction set not available — Kustainer requires AVX2.\n" \
+         "  Your VM is not exposing host CPU features. Fix in your hypervisor:\n" \
+         "    VMware   : VM Settings → Processors → 'Expose hardware-assisted virtualisation'\n" \
+         "    VirtualBox: System → Processor → Paravirtualisation: KVM + enable Nested VT-x\n" \
+         "    KVM/QEMU : Set CPU model to 'host' (-cpu host)\n" \
+         "    Proxmox  : VM → Hardware → Processor → CPU type: host\n" \
+         "  Then verify with: grep avx2 /proc/cpuinfo | head -1"
+fi
+info "AVX2: present — OK."
+
 # RAM check — Kustainer (ADX) is memory-hungry; OOM kill = exit 137 crash loop
 TOTAL_RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
 TOTAL_RAM_GB=$(awk "BEGIN{printf \"%.1f\", $TOTAL_RAM_KB/1048576}")
@@ -81,6 +95,22 @@ elif awk "BEGIN{exit !($TOTAL_RAM_GB < 6)}"; then
     warn "RAM: ${TOTAL_RAM_GB} GB — Kustainer may be slow or unstable below 6 GB."
 else
     info "RAM: ${TOTAL_RAM_GB} GB — OK."
+fi
+
+# vm.max_map_count — Kustainer uses mmap-heavy storage (same as Elasticsearch).
+# Without this the kernel SIGKILL's the process at startup (exit 137), regardless
+# of available RAM. Minimum is 262144; we set 524288 for headroom.
+MIN_MAP_COUNT=262144
+CUR_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)
+if (( CUR_MAP_COUNT < MIN_MAP_COUNT )); then
+    warn "vm.max_map_count is ${CUR_MAP_COUNT} (need >=${MIN_MAP_COUNT}) — fixing now ..."
+    sysctl -w vm.max_map_count=524288 >/dev/null
+    # Make it survive reboots
+    grep -qxF 'vm.max_map_count=524288' /etc/sysctl.conf 2>/dev/null || \
+        echo 'vm.max_map_count=524288' >> /etc/sysctl.conf
+    info "vm.max_map_count set to 524288 (persisted in /etc/sysctl.conf)."
+else
+    info "vm.max_map_count: ${CUR_MAP_COUNT} — OK."
 fi
 
 # Disk space check — Kustainer writes aggressively; a full disk bricks the host
