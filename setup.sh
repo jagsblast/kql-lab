@@ -23,6 +23,7 @@ MAX_WAIT=180
 # Load .env if present
 [[ -f "$SCRIPT_DIR/.env" ]] && set -o allexport && source "$SCRIPT_DIR/.env" && set +o allexport
 DATA_RETENTION_DAYS="${DATA_RETENTION_DAYS:-7}"    # keep N days of events
+DATA_MAX_GB="${DATA_MAX_GB:-5}"                    # cap ./data/ at this many GB
 DATA_WARN_GB="${DATA_WARN_GB:-2}"                  # warn if free space < N GB
 DATA_MIN_FREE_GB="${DATA_MIN_FREE_GB:-1}"           # abort if free space < N GB
 
@@ -53,6 +54,18 @@ elif awk "BEGIN{exit !($FREE_GB < $DATA_WARN_GB)}"; then
     warn "Low disk space: ${FREE_GB} GB free (threshold: ${DATA_WARN_GB} GB). Monitor closely."
 else
     info "Disk space OK: ${FREE_GB} GB free."
+fi
+
+# Data directory size check — warn if ./data/ already exceeds DATA_MAX_GB
+if [[ -d "$SCRIPT_DIR/data" ]]; then
+    DATA_KB=$(du -sk "$SCRIPT_DIR/data" | awk '{print $1}')
+    DATA_GB=$(echo "scale=1; $DATA_KB / 1048576" | bc)
+    if awk "BEGIN{exit !($DATA_GB > $DATA_MAX_GB)}"; then
+        warn "./data/ is ${DATA_GB} GB — over the ${DATA_MAX_GB} GB cap."
+        warn "Run ./trim.sh to reduce retention and reclaim space."
+    else
+        info "Data directory: ${DATA_GB} GB / ${DATA_MAX_GB} GB cap."
+    fi
 fi
 info "Retention policy: ${DATA_RETENTION_DAYS} days (set DATA_RETENTION_DAYS in .env to change)."
 

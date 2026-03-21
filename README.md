@@ -28,25 +28,42 @@ Windows DC (WinLogBeat)
 
 ## Storage limits
 
-By default `setup.sh` configures a **7-day retention policy** inside Kustainer.
-ADX automatically drops extents older than that — no manual cleanup needed.
+By default `setup.sh` configures a **7-day retention policy** and a **5 GB cap** on `./data/`.
+ADX automatically drops extents older than the retention window — no manual cleanup needed.
 
-To change the retention window, copy `.env.example` to `.env` and edit:
+Configure both in `.env` (copy from `.env.example`):
 
 ```bash
 cp .env.example .env
-# edit .env:
-DATA_RETENTION_DAYS=3   # keep only 3 days
-DATA_WARN_GB=2          # warn if < 2 GB free
-DATA_MIN_FREE_GB=1      # abort setup if < 1 GB free
 ```
 
-Then re-run `./setup.sh` — it's idempotent and will update the policy in place.
+```ini
+DATA_RETENTION_DAYS=7   # drop events older than N days
+DATA_MAX_GB=5           # target cap for ./data/ directory
+DATA_WARN_GB=2          # warn in setup.sh if free disk < N GB
+DATA_MIN_FREE_GB=1      # abort setup.sh if free disk < N GB
+```
 
-To check current disk usage at any time:
+**When `./data/` exceeds `DATA_MAX_GB`**, run `trim.sh`:
 
 ```bash
+./trim.sh              # auto-reduce retention to fit under the cap
+./trim.sh --check      # report size only, make no changes
+./trim.sh --force 3    # force retention to exactly 3 days
+```
+
+`trim.sh` calculates a proportional new retention window, applies it to Kustainer,
+and persists it back to `.env`. ADX purges the old extents in the background (~5 min).
+
+**Cron** (check hourly, trim if needed):
+```bash
+0 * * * * /path/to/kql-lab/trim.sh >> /var/log/kql-lab-trim.log 2>&1
+```
+
+Check current disk usage:
+```bash
 du -sh ./data/
+./trim.sh --check
 ```
 
 ---
