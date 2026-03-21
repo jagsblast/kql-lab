@@ -86,11 +86,14 @@ if ($totalRAMGB -lt 4) {
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     fail "docker not found.`nInstall Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
 }
-$dockerInfo = docker info 2>&1
-if ($LASTEXITCODE -ne 0) {
-    fail "Cannot connect to the Docker daemon. Is Docker Desktop running?`n$dockerInfo"
+$dockerInfo = $null
+try {
+    $dockerInfo = & docker info 2>&1
+} catch { }
+if ($LASTEXITCODE -ne 0 -or $dockerInfo -match 'error during connect') {
+    fail "Cannot connect to Docker Desktop. Make sure Docker Desktop is running (check the system tray icon).`nError: $($dockerInfo | Select-Object -First 1)"
 }
-docker compose version 2>&1 | Out-Null
+& docker compose version 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     fail "'docker compose' plugin not found. Update Docker Desktop to 4.x+."
 }
