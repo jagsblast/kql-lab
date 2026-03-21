@@ -178,51 +178,51 @@ wevtutil sl "Microsoft-Windows-TaskScheduler/Operational" /ms:104857600
 wevtutil sl "Microsoft-Windows-Windows Defender/Operational" /ms:104857600
 
 # 4f-ii. Enable logs that are disabled by default on Server/DC SKUs.
-#        wevtutil sl <channel> /e:true   — enable channel
-#        wevtutil sl <channel> /ms:<bytes> — set max size
+#        wevtutil sl <channel> /e:true    --  enable channel
+#        wevtutil sl <channel> /ms:<bytes>  --  set max size
 $logsToEnable = @(
-    # DNS Client operational — outbound queries from this host (DGA, C2 beaconing)
+    # DNS Client operational  --  outbound queries from this host (DGA, C2 beaconing)
     "Microsoft-Windows-DNS-Client/Operational",
-    # Code Integrity / WDAC — unsigned driver/DLL blocks, BYOVD detection
+    # Code Integrity / WDAC  --  unsigned driver/DLL blocks, BYOVD detection
     "Microsoft-Windows-CodeIntegrity/Operational",
-    # WMI activity — remote execution, persistent WMI subscriptions
+    # WMI activity  --  remote execution, persistent WMI subscriptions
     "Microsoft-Windows-WMI-Activity/Operational",
-    # Certificate lifecycle (user context) — ESC/shadow credential follow-on
+    # Certificate lifecycle (user context)  --  ESC/shadow credential follow-on
     "Microsoft-Windows-CertificateServicesClient-Lifecycle-User/Operational",
-    # LSA operational — SSP injection, auth anomalies (memssp)
+    # LSA operational  --  SSP injection, auth anomalies (memssp)
     "Microsoft-Windows-LSA/Operational",
-    # CAPI2 — PKI chain building, private key access, PKINIT auth
+    # CAPI2  --  PKI chain building, private key access, PKINIT auth
     "Microsoft-Windows-CAPI2/Operational",
-    # Kernel time — clock manipulation (log timeline / Kerberos abuse)
+    # Kernel time  --  clock manipulation (log timeline / Kerberos abuse)
     "Microsoft-Windows-Kernel-General/Operational",
-    # PnP device config — USB hardware implants, rogue peripherals
+    # PnP device config  --  USB hardware implants, rogue peripherals
     "Microsoft-Windows-Kernel-PnP/Device Configuration",
     # AppLocker packaged app execution
     "Microsoft-Windows-AppLocker/Packaged app-Execution",
-    # PowerShell PSSession events (8193/8194/8197) — PSRemoting lateral movement
+    # PowerShell PSSession events (8193/8194/8197)  --  PSRemoting lateral movement
     "Microsoft-Windows-PowerShell/Operational",
-    # RDP channels — session auth/logon/disconnect and source IP attribution (several disabled by default)
+    # RDP channels  --  session auth/logon/disconnect and source IP attribution (several disabled by default)
     "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
     "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
     "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational",
     "Microsoft-Windows-TerminalServices-RDPClient/Operational",
-    # SMB server/client security — admin share access, payload write patterns
+    # SMB server/client security  --  admin share access, payload write patterns
     "Microsoft-Windows-SmbServer/Security",
     "Microsoft-Windows-SmbClient/Security",
-    # BITS Client — stealth payload downloads and C2 fetch via background service
+    # BITS Client  --  stealth payload downloads and C2 fetch via background service
     "Microsoft-Windows-Bits-Client/Operational",
-    # Group Policy — GPO startup script deployment, policy tampering
+    # Group Policy  --  GPO startup script deployment, policy tampering
     "Microsoft-Windows-GroupPolicy/Operational",
-    # Authentication policy — Protected Users failures; PAW/tier silo violations (DC-only)
+    # Authentication policy  --  Protected Users failures; PAW/tier silo violations (DC-only)
     "Microsoft-Windows-Authentication/ProtectedUser-Client",
     "Microsoft-Windows-Authentication/ProtectedUserFailures-DomainController",
     "Microsoft-Windows-Authentication/ProtectedUserSuccesses-DomainController",
     "Microsoft-Windows-Authentication/AuthenticationPolicyFailures-DomainController",
-    # AppCompat shim engine — shim persistence, UAC bypass via shimming
+    # AppCompat shim engine  --  shim persistence, UAC bypass via shimming
     "Microsoft-Windows-Kernel-ShimEngine/Operational",
-    # Windows Update — patch suppression and servicing abuse context
+    # Windows Update  --  patch suppression and servicing abuse context
     "Microsoft-Windows-WindowsUpdateClient/Operational",
-    # Print Service — Print Nightmare (CVE-2021-34527), spooler exploitation
+    # Print Service  --  Print Nightmare (CVE-2021-34527), spooler exploitation
     "Microsoft-Windows-PrintService/Operational"
 )
 foreach ($log in $logsToEnable) {
@@ -234,7 +234,7 @@ foreach ($log in $logsToEnable) {
         }
         wevtutil sl "$log" /ms:52428800 2>&1 | Out-Null  # 50 MB cap
     } catch {
-        Write-Warning "Could not enable log channel: $log — $($_.Exception.Message)"
+        Write-Warning "Could not enable log channel: $log  --  $($_.Exception.Message)"
     }
 }
 
@@ -344,7 +344,7 @@ gpupdate /force /target:computer 2>&1 | Select-String "successfully" | ForEach-O
 #   AdminSDHolder      - nTSecurityDescriptor/member writes (ACL persistence T1484)
 #   krbtgt             - attribute changes (Golden Ticket prep, password manipulation)
 #   GPO policies CN    - child creation / attribute writes (GPO-based persistence T1484.001)
-#   Built-in DA group  - member adds (T1098.003) — belt-and-suspenders for 4728
+#   Built-in DA group  - member adds (T1098.003)  --  belt-and-suspenders for 4728
 #   Domain root DACL   - WRITE_DAC audit catches 4670 (permission changes on root object)
 # =============================================================================
 Write-Host "[4/5] Setting AD object SACLs for sensitive objects ..."
@@ -387,21 +387,21 @@ try {
     $writeAll   = $writeProps -bor $writeDac -bor
                   [System.DirectoryServices.ActiveDirectoryRights]::WriteOwner
 
-    # AdminSDHolder — detect ACL tamper used for persistence (T1484)
+    # AdminSDHolder  --  detect ACL tamper used for persistence (T1484)
     Add-ADAuditRule "LDAP://CN=AdminSDHolder,CN=System,$domainDC" `
         "AdminSDHolder write (ACL persistence / T1484)" $writeAll
 
-    # krbtgt — detect attribute or password manipulation (Golden Ticket prep)
+    # krbtgt  --  detect attribute or password manipulation (Golden Ticket prep)
     Add-ADAuditRule "LDAP://CN=krbtgt,CN=Users,$domainDC" `
         "krbtgt attribute write (Golden Ticket prep)" $writeAll
 
-    # GPO policies container — detect new GPO creation / GPO attribute tamper
+    # GPO policies container  --  detect new GPO creation / GPO attribute tamper
     Add-ADAuditRule "LDAP://CN=Policies,CN=System,$domainDC" `
         "GPO Policies container write (T1484.001)" `
         ($writeProps -bor [System.DirectoryServices.ActiveDirectoryRights]::CreateChild `
                      -bor [System.DirectoryServices.ActiveDirectoryRights]::DeleteChild)
 
-    # Domain Admins group — belt-and-suspenders for 4728 member adds
+    # Domain Admins group  --  belt-and-suspenders for 4728 member adds
     $daName = "Domain Admins"
     $searcher = New-Object System.DirectoryServices.DirectorySearcher
     $searcher.Filter = "(&(objectClass=group)(cn=$daName))"
@@ -412,7 +412,7 @@ try {
             "Domain Admins member write (T1098.003)" $writeProps
     }
 
-    # Domain root — WRITE_DAC audits 4670 (permission change on domain object)
+    # Domain root  --  WRITE_DAC audits 4670 (permission change on domain object)
     $domainDE = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$domainDC")
     $domainDE.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Sacl
     $domainDE.psbase.RefreshCache(@("nTSecurityDescriptor"))
@@ -437,9 +437,9 @@ try {
 # STEP 4l - File system SACLs for high-value paths (fires 4663)
 # =============================================================================
 # Required for 4663 (object access) to fire for sensitive file paths:
-#   C:\Windows\NTDS\       — NTDS.dit access = credential dumping (T1003.003)
-#   C:\Windows\SYSVOL\     — GPO/script reads = lateral prep, GPO hijack (T1484)
-#   C:\Windows\System32\config\ — SAM/SECURITY hive = offline credential theft
+#   C:\Windows\NTDS\        --  NTDS.dit access = credential dumping (T1003.003)
+#   C:\Windows\SYSVOL\      --  GPO/script reads = lateral prep, GPO hijack (T1484)
+#   C:\Windows\System32\config\  --  SAM/SECURITY hive = offline credential theft
 # =============================================================================
 Write-Host "[4/5] Setting file system SACLs on sensitive paths ..."
 
@@ -472,7 +472,7 @@ foreach ($entry in $fileSacls) {
     }
     try {
         # icacls sets SACL via /audit switch:
-        #   /audit:S:(AU;OICINPFA;<perms>;;;WD) — WD = World/Everyone
+        #   /audit:S:(AU;OICINPFA;<perms>;;;WD)  --  WD = World/Everyone
         # Using icacls because PowerShell's Set-Acl on directories requires
         # loading the entire DACL first, risking inadvertent DACL changes.
         $aceFlags = "OI CI NP FA"  # OI=object inherit, CI=container inherit, NP=no propagate, FA=full audit
@@ -522,12 +522,12 @@ foreach ($entry in $fileSacls) {
 # are completely invisible in the Security log.
 #
 # Paths covered:
-#   Run/RunOnce keys       — classic persistence (T1547.001)
-#   Services key           — service-based persistence and BYOVD helper (T1543.003)
-#   IFEO                   — debugger hijack / accessibility persistence (T1546.012)
-#   LSA                    — SSP/auth package injection (T1547.005)
-#   Defender policy        — Defender config tamper via registry (T1562.001)
-#   WinLogon               — logon provider / userinit tampering (T1547.004)
+#   Run/RunOnce keys        --  classic persistence (T1547.001)
+#   Services key            --  service-based persistence and BYOVD helper (T1543.003)
+#   IFEO                    --  debugger hijack / accessibility persistence (T1546.012)
+#   LSA                     --  SSP/auth package injection (T1547.005)
+#   Defender policy         --  Defender config tamper via registry (T1562.001)
+#   WinLogon                --  logon provider / userinit tampering (T1547.004)
 # =============================================================================
 Write-Host "[4/5] Setting registry SACLs on persistence and security-critical paths ..."
 
