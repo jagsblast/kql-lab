@@ -1,0 +1,206 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// threatref_enrich.kql
+// ThreatReference lookup queries for threat-enriched WindowsEvents analysis
+//
+// Prerequisites: run ./load-threatref.sh to populate the ThreatReference table.
+// Join key: (EventId, Channel) on left  ←→  (EventId, LogSource) on right
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ── 1. Enriched event feed (last 1 hour, known threats only) ─────────────────
+//
+// Fast triage view: every event the reference knows about, sorted by severity.
+//
+let Lookback = ago(1h);
+WindowsEvents
+| where TimeCreated > Lookback
+| lookup kind=leftouter ThreatReference
+    on $left.EventId == $right.EventId,
+       $left.Channel  == $right.LogSource
+| where isnotempty(Priority)
+| extend PriorityOrder = case(
+    Priority == "Critical", 0,
+    Priority == "High",     1,
+    Priority == "Medium",   2,
+    3
+)
+| project TimeCreated, Computer, EventId, EventName, Channel,
+          Priority, Category, SubCategory, MitreIds, ThreatActions
+| order by PriorityOrder asc, TimeCreated desc;
+
+
+// ── 2. Critical & High events — last 24 hours ────────────────────────────────
+//
+// SOC daily briefing view.
+//
+let Lookback = ago(24h);
+WindowsEvents
+| where TimeCreated > Lookback
+| lookup kind=leftouter ThreatReference
+    on $left.EventId == $right.EventId,
+       $left.Channel  == $right.LogSource
+| where Priority in ("Critical", "High")
+| summarize
+    Count       = count(),
+    Computers   = make_set(Computer, 20),
+    FirstSeen   = min(TimeCreated),
+    LastSeen    = max(TimeCreated)
+    by EventId, EventName, Category, SubCategory, MitreIds, Priority
+| extend PriorityOrder = case(Priority == "Critical", 0, 1)
+| order by PriorityOrder asc, Count desc;
+
+
+// ── 3. MITRE technique frequency — last 24 hours ─────────────────────────────
+//
+// Which MITRE techniques are most active? Explodes comma-separated MitreIds.
+//
+let Lookback = ago(24h);
+WindowsEvents
+| where TimeCreated > Lookback
+| lookup kind=leftouter ThreatReference
+    on $left.EventId == $right.EventId,
+       $left.Channel  == $right.LogSource
+| where isnotempty(MitreIds)
+| mv-expand Technique = split(MitreIds, ",") to typeof(string)
+| extend Technique = trim(" ", Technique)
+| where isnotempty(Technique)
+| summarize
+    Events    = count(),
+    EventIds  = make_set(EventId, 10),
+    Computers = make_set(Computer, 10)
+    by Technique, Category
+| order by Events desc;
+
+
+// ── 4. Coverage check — what you are collecting vs the reference ──────────────
+//
+// Shows every entry in ThreatReference with a flag for whether you have seen
+// that (EventId, LogSource) combination in the last 24 hours.
+// Rows where Collecting==false are gaps in your Windows logging configuration.
+//
+let Lookback = ago(24h);
+let Seen =
+    WindowsEvents
+    | where TimeCreated > Lookback
+    | summarize EventCount = count() by EventId, Channel;
+ThreatReference
+| join kind=leftouter Seen
+    on $left.EventId == $right.EventId,
+       $left.LogSource == $right.Channel
+| extend
+    Collecting  = isnotnull(EventCount),
+    EventCount  = coalesce(EventCount, 0)
+| extend PriorityOrder = case(
+    Priority == "Critical", 0,
+    Priority == "High",     1,
+    Priority == "Medium",   2,
+    3
+)
+| project Priority, LogSource, EventId, EventName,
+          Category, Collecting, EventCount, CollectionTier
+| order by Collecting asc, PriorityOrder asc, EventId asc;
+
+
+// ── 5. Attack chain detection — Kerberoasting sequence ───────────────────────
+//
+// Looks for the full Kerberoast chain:
+//   4672 (admin logon) → 4768 (TGT) → 4769 (RC4 TGS) within 30 min per host
+//
+let Lookback = ago(24h);
+let ChainWindow = 30m;
+let Admin4672 =
+    WindowsEvents
+    | where TimeCreated > Lookback
+    | where EventId == 4672 and Channel == "Security"
+    | project AdminTime = TimeCreated, Computer,
+              User = tostring(EventData.SubjectUserName);
+let TGT4768 =
+    WindowsEvents
+    | where TimeCreated > Lookback
+    | where EventId == 4768 and Channel == "Security"
+    | project TGTTime = TimeCreated, Computer,
+              User = tostring(EventData.TargetUserName);
+let TGS4769 =
+    WindowsEvents
+    | where TimeCreated > Lookback
+    | where EventId == 4769 and Channel == "Security"
+    | where tostring(EventData.TicketEncryptionType) == "0x17"   // RC4
+    | where tostring(EventData.Status) == "0x0"                  // success
+    | project TGSTime = TimeCreated, Computer,
+              User = tostring(EventData.TargetUserName),
+              SPN  = tostring(EventData.ServiceName);
+Admin4672
+| join kind=inner TGT4768
+    on Computer, User
+| where TGTTime between (AdminTime .. (AdminTime + ChainWindow))
+| join kind=inner TGS4769
+    on Computer, User
+| where TGSTime between (TGTTime .. (TGTTime + ChainWindow))
+| project AdminTime, TGTTime, TGSTime, Computer, User, SPN
+| extend ChainDuration = TGSTime - AdminTime
+| order by AdminTime desc;
+
+
+// ── 6. Persistence indicators — last 24 hours ────────────────────────────────
+//
+// Events mapped to the Persistence tactic across all log sources.
+//
+let Lookback = ago(24h);
+WindowsEvents
+| where TimeCreated > Lookback
+| lookup kind=leftouter ThreatReference
+    on $left.EventId == $right.EventId,
+       $left.Channel  == $right.LogSource
+| where Category has "Persistence"
+| extend PriorityOrder = case(
+    Priority == "Critical", 0,
+    Priority == "High",     1,
+    Priority == "Medium",   2,
+    3
+)
+| project TimeCreated, Computer, EventId, EventName,
+          SubCategory, Priority, MitreIds, ThreatActions
+| order by PriorityOrder asc, TimeCreated desc;
+
+
+// ── 7. Credential access heatmap — last 7 days ───────────────────────────────
+//
+// Per-computer summary of credential-access mapped events over the week.
+// Useful for spotting compromised hosts or spray campaign targets.
+//
+let Lookback = ago(7d);
+WindowsEvents
+| where TimeCreated > Lookback
+| lookup kind=leftouter ThreatReference
+    on $left.EventId == $right.EventId,
+       $left.Channel  == $right.LogSource
+| where Category has "Credential Access"
+| summarize
+    TotalEvents   = count(),
+    UniqueEventIds = dcount(EventId),
+    CriticalCount = countif(Priority == "Critical"),
+    HighCount     = countif(Priority == "High"),
+    Techniques    = make_set(MitreIds, 15)
+    by Computer
+| extend RiskScore = CriticalCount * 3 + HighCount * 1
+| order by RiskScore desc;
+
+
+// ── 8. New threat reference entries since last push ───────────────────────────
+//
+// Quick metadata query — useful after refreshing the reference table.
+//
+ThreatReference
+| summarize
+    TotalRecords = count(),
+    LogSources   = dcount(LogSource),
+    CriticalCount = countif(Priority == "Critical"),
+    HighCount    = countif(Priority == "High"),
+    MediumCount  = countif(Priority == "Medium"),
+    LowCount     = countif(Priority == "Low")
+| extend CoverageNote = strcat(
+    "Critical: ", CriticalCount, "  |  ",
+    "High: ", HighCount, "  |  ",
+    "Medium: ", MediumCount, "  |  ",
+    "Low: ", LowCount
+);
