@@ -16,17 +16,19 @@ DB        = os.environ.get("KUSTAINER_DB",  "NetDefaultDB")
 TABLE     = os.environ.get("KUSTAINER_TABLE", "WindowsEvents")
 MAPPING   = os.environ.get("KUSTAINER_MAPPING", "winlogbeat_mapping")
 PORT      = int(os.environ.get("RELAY_PORT", "9001"))
-BATCH_MAX = int(os.environ.get("BATCH_MAX", "50"))
+BATCH_MAX    = int(os.environ.get("BATCH_MAX",    "500"))
+NUM_WORKERS  = int(os.environ.get("NUM_WORKERS",  "4"))
 
 event_queue: queue.Queue = queue.Queue()
 
 
-def ingest_event(event: dict) -> None:
-    event_json = json.dumps(event)
+def ingest_batch(events: list) -> None:
+    """Send an entire batch in one multijson inline-ingest call."""
+    ndjson = "\n".join(json.dumps(e) for e in events)
     csl = (
         f".ingest inline into table {TABLE} "
-        f"with (format=json, ingestionMappingReference={MAPPING}) <| "
-        f"{event_json}"
+        f"with (format=multijson, ingestionMappingReference={MAPPING}) <|\n"
+        f"{ndjson}"
     )
     body = json.dumps({"db": DB, "csl": csl}).encode()
     req = urllib.request.Request(
@@ -51,20 +53,16 @@ def worker() -> None:
         except queue.Empty:
             pass
 
-        failed = []
-        for event in batch:
-            try:
-                ingest_event(event)
-            except Exception as exc:
-                print(f"WARN: ingest failed, will retry: {exc}", file=sys.stderr, flush=True)
-                failed.append(event)
-        if failed:
-            for event in failed:
+        if not batch:
+            continue
+        try:
+            ingest_batch(batch)
+            print(f"INFO: ingested {len(batch)} event(s)", flush=True)
+        except Exception as exc:
+            print(f"WARN: batch ingest failed, requeueing {len(batch)} events: {exc}", file=sys.stderr, flush=True)
+            for event in batch:
                 event_queue.put(event)
             time.sleep(5)  # back-off before retry
-        if batch:
-            ingested = len(batch) - len(failed)
-            print(f"INFO: ingested {ingested}/{len(batch)} event(s) ({len(failed)} requeued)", flush=True)
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -88,7 +86,9 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    Thread(target=worker, daemon=True).start()
+    for _ in range(NUM_WORKERS):
+        Thread(target=worker, daemon=True).start()
+    print(f"Started {NUM_WORKERS} worker threads, BATCH_MAX={BATCH_MAX}", flush=True)
     server = HTTPServer(("0.0.0.0", PORT), RelayHandler)
     print(f"Relay listening on :{PORT} — queue ready", flush=True)
     server.serve_forever()

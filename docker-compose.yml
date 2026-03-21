@@ -53,7 +53,8 @@ services:
       KUSTAINER_TABLE:   "WindowsEvents"
       KUSTAINER_MAPPING: "winlogbeat_mapping"
       RELAY_PORT:        "9001"
-      BATCH_MAX:         "50"
+      BATCH_MAX:         "500"
+      NUM_WORKERS:       "4"
 
   # ── Logstash — receives WinLogBeat events, ships to relay ─────────────────
   logstash:
