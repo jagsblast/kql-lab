@@ -1,0 +1,271 @@
+---
+# setup-dc.yml — Promote Windows Server to DC and configure lab objects.
+#
+# Mirrors the two-phase setup-dc.ps1 workflow without scheduled tasks:
+#   Ansible handles all reboots natively and reconnects automatically.
+#
+# Usage:
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook -i inventory.ini setup-dc.yml
+#
+# If group_vars/dc.yml is vault-encrypted:
+#   ansible-playbook -i inventory.ini setup-dc.yml --ask-vault-pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 1 — Rename → install features → promote to Domain Controller
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Phase 1 — Promote server to Domain Controller
+  hosts: dc
+  gather_facts: false
+
+  tasks:
+    # ── 1a. Rename ────────────────────────────────────────────────────────────
+    - name: "[1a] Set hostname to {{ dc_hostname }}"
+      ansible.windows.win_hostname:
+        name: "{{ dc_hostname }}"
+      register: hostname_result
+
+    - name: "[1a] Reboot to apply hostname change"
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+        post_reboot_delay: 30
+        connect_timeout: 60
+      when: hostname_result.reboot_required
+
+    # ── 1b. Install Windows features ──────────────────────────────────────────
+    - name: "[1b] Install AD DS, DNS, GPMC and RSAT features"
+      ansible.windows.win_feature:
+        name:
+          - AD-Domain-Services
+          - DNS
+          - GPMC
+          - RSAT-AD-Tools
+          - RSAT-AD-PowerShell
+          - RSAT-DNS-Server
+        include_management_tools: true
+        state: present
+      register: feature_result
+
+    - name: "[1b] Reboot after feature installation if required"
+      ansible.windows.win_reboot:
+        reboot_timeout:    600
+        post_reboot_delay: 30
+        connect_timeout:   60
+      when: feature_result.reboot_required or feature_result.changed
+
+    # ── 1c. Promote to DC ─────────────────────────────────────────────────────
+    # microsoft.ad.domain detects if promotion is already done (idempotent).
+    # reboot: true  →  Ansible issues the reboot and waits for reconnection.
+    - name: "[1c] Promote to Domain Controller (forest: {{ domain_name }})"
+      microsoft.ad.domain:
+        dns_domain_name:      "{{ domain_name }}"
+        domain_netbios_name:  "{{ domain_netbios }}"
+        safe_mode_password:   "{{ safe_mode_password }}"
+        install_dns:          true
+        reboot:               false
+      register: domain_result
+
+    - name: "[1c] Reboot after DC promotion"
+      ansible.windows.win_reboot:
+        reboot_timeout:   600
+        post_reboot_delay: 30
+        connect_timeout:   60
+      when: domain_result.reboot_required
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 2 — Configure lab OUs, users, SPNs, policy, DNS and firewall
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Phase 2 — Configure lab objects on Domain Controller
+  hosts: dc
+  gather_facts: false
+
+  tasks:
+    # ── Wait for AD to stabilise ──────────────────────────────────────────────
+    # Step 1: wait for LDAP port 389 to be listening — faster and more reliable
+    # than polling AD cmdlets which throw terminating errors while starting up.
+    - name: Wait for LDAP port 389 to be open (AD DS starting up)
+      ansible.windows.win_wait_for:
+        port:    389
+        timeout: 300
+        delay:   10
+
+    # Step 2: confirm AD cmdlets actually work (replication / SYSVOL may still
+    # be settling after the port opens).
+    - name: Wait for Active Directory to be ready
+      ansible.windows.win_shell: |
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Get-ADDomain -ErrorAction Stop | Out-Null
+      register: ad_check
+      retries: 24       # up to 4 minutes
+      delay: 10
+      until: ad_check.rc is defined and ad_check.rc == 0
+      failed_when: not (ad_check.rc is defined and ad_check.rc == 0)
+
+    # ── 2a. OU structure ──────────────────────────────────────────────────────
+    - name: "[2a] Create Lab OU"
+      microsoft.ad.ou:
+        name:                 Lab
+        path:                 "{{ domain_dn }}"
+        protect_from_deletion: false
+        state:                present
+
+    - name: "[2a] Create child OUs under Lab"
+      microsoft.ad.ou:
+        name:                 "{{ item }}"
+        path:                 "OU=Lab,{{ domain_dn }}"
+        protect_from_deletion: false
+        state:                present
+      loop:
+        - LabUsers
+        - LabServices
+        - LabComputers
+
+    # ── 2b. Lab user accounts ─────────────────────────────────────────────────
+    - name: "[2b] Create lab user accounts"
+      microsoft.ad.user:
+        name:                   "{{ item.sam }}"
+        sam_account_name:       "{{ item.sam }}"
+        firstname:              "{{ item.given_name }}"
+        lastname:               "{{ item.surname }}"
+        upn:                    "{{ item.upn }}"
+        password:               "{{ item.password }}"
+        description:            "{{ item.description }}"
+        path:                   "{{ item.ou }}"
+        enabled:                true
+        password_never_expires: true
+        update_password:        when_changed
+        state:                  present
+      loop: "{{ lab_users }}"
+
+    # ── 2b. Group membership ──────────────────────────────────────────────────
+    - name: "[2b] Add labadmin to Domain Admins"
+      microsoft.ad.group:
+        name:  "Domain Admins"
+        scope: global
+        members:
+          add:
+            - labadmin
+        state: present
+
+    # ── 2c. SPNs on svc_sql ───────────────────────────────────────────────────
+    - name: "[2c] Set SPNs on svc_sql (Kerberoasting target)"
+      ansible.windows.win_powershell:
+        script: |
+          Set-ADUser -Identity svc_sql `
+            -ServicePrincipalNames @{Add = "{{ item }}"} `
+            -ErrorAction SilentlyContinue
+      loop: "{{ svc_sql_spns }}"
+
+    # ── 2d. RC4-only encryption on svc_sql ────────────────────────────────────
+    # msDS-SupportedEncryptionTypes = 4 forces RC4_HMAC tickets (0x17 in event 4769).
+    - name: "[2d] Set RC4-only encryption on svc_sql"
+      ansible.windows.win_powershell:
+        script: |
+          Set-ADUser -Identity svc_sql `
+            -Replace @{"msDS-SupportedEncryptionTypes" = 4}
+
+    # ── 2e. Domain password policy ────────────────────────────────────────────
+    - name: "[2e] Set permissive domain password policy (lab only)"
+      ansible.windows.win_powershell:
+        script: |
+          Set-ADDefaultDomainPasswordPolicy `
+            -Identity              "{{ domain_name }}" `
+            -MinPasswordLength     8 `
+            -MaxPasswordAge        0 `
+            -MinPasswordAge        0 `
+            -PasswordHistoryCount  0 `
+            -ComplexityEnabled     $false `
+            -ReversibleEncryptionEnabled $false
+
+    # ── 2f. DNS forwarders ────────────────────────────────────────────────────
+    - name: "[2f] Add DNS forwarders (8.8.8.8, 1.1.1.1)"
+      ansible.windows.win_powershell:
+        script: |
+          @("8.8.8.8", "1.1.1.1") | ForEach-Object {
+              Add-DnsServerForwarder -IPAddress $_ -ErrorAction SilentlyContinue
+          }
+
+    # ── 2g. Reverse DNS zone ──────────────────────────────────────────────────
+    - name: "[2g] Create reverse DNS zone"
+      ansible.windows.win_powershell:
+        script: |
+          $ip = (Get-NetIPAddress -AddressFamily IPv4 |
+                 Where-Object { $_.PrefixOrigin -ne "WellKnown" } |
+                 Select-Object -First 1).IPAddress
+          if ($ip) {
+              $parts = $ip.Split(".")
+              Add-DnsServerPrimaryZone `
+                  -NetworkID "$($parts[0]).$($parts[1]).$($parts[2]).0/24" `
+                  -ReplicationScope Domain `
+                  -ErrorAction SilentlyContinue
+          }
+
+    # ── 2h. Firewall — enable AD DS rules ────────────────────────────────────
+    - name: "[2h] Enable AD DS firewall rules"
+      ansible.windows.win_powershell:
+        script: |
+          $rules = @(
+              "Kerberos Key Distribution Center",
+              "Active Directory Domain Controller - LDAP (TCP-In)",
+              "Active Directory Domain Controller - LDAP (UDP-In)",
+              "Active Directory Domain Controller - Secure LDAP (TCP-In)",
+              "Active Directory Domain Controller - SAM/LSA (NP-TCP-In)",
+              "DNS (TCP, Incoming)",
+              "DNS (UDP, Incoming)"
+          )
+          $rules | ForEach-Object {
+              Enable-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue
+          }
+          # RPC groups (AD replication, BloodHound DCOM enumeration)
+          Enable-NetFirewallRule -Group "@FirewallAPI.dll,-32752" -ErrorAction SilentlyContinue
+          Enable-NetFirewallRule -Group "@FirewallAPI.dll,-32758" -ErrorAction SilentlyContinue
+          Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502" -ErrorAction SilentlyContinue
+
+    # ── 2i. WinRM ─────────────────────────────────────────────────────────────
+    - name: "[2i] Ensure WinRM service is running and set to auto-start"
+      ansible.windows.win_service:
+        name:       WinRM
+        start_mode: auto
+        state:      started
+
+    - name: "[2i] Set WinRM TrustedHosts to * (lab convenience)"
+      ansible.windows.win_powershell:
+        script: |
+          Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
+
+    # ── 2j. Disable IE Enhanced Security ─────────────────────────────────────
+    - name: "[2j] Disable IE Enhanced Security Configuration"
+      ansible.windows.win_regedit:
+        path:  "HKLM:\\SOFTWARE\\Microsoft\\Active Setup\\Installed Components\\{{ item }}"
+        name:  IsInstalled
+        data:  0
+        type:  dword
+      loop:
+        - "{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"   # admin
+        - "{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"   # user
+
+    # ── 2k. Disable Domain firewall profile (lab convenience) ─────────────────
+    - name: "[2k] Disable Windows Firewall on Domain profile (lab only)"
+      ansible.windows.win_powershell:
+        script: |
+          Set-NetFirewallProfile -Profile Domain -Enabled False
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    - name: Print lab summary
+      ansible.builtin.debug:
+        msg:
+          - "DC Lab Setup COMPLETE"
+          - "Domain     : {{ domain_name }} ({{ domain_netbios }})"
+          - "DC         : {{ dc_hostname }}.{{ domain_name }}"
+          - ""
+          - "Lab accounts:"
+          - "  attacker  / Pass123!          -- low-priv attacker (Kali simulation)"
+          - "  svc_sql   / SqlS3rv1ce!2024   -- service acct, SPN set, RC4 forced"
+          - "  labadmin  / LabAdm1n!2024     -- Domain Admin (privilege esc target)"
+          - ""
+          - "SPNs on svc_sql:"
+          - "  MSSQLSvc/sql01.{{ domain_name }}"
+          - "  MSSQLSvc/sql01.{{ domain_name }}:1433"
+          - ""
+          - "Next: run install-winlogbeat.ps1 to ship events to logstash."

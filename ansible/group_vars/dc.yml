@@ -1,0 +1,42 @@
+---
+# ── Domain identity ───────────────────────────────────────────────────────────
+domain_name:    insane.local
+domain_netbios: INSANE
+domain_dn:      "DC=insane,DC=local"
+dc_hostname:    Kql-lab-DC
+logstash_host:  192.168.68.61
+
+# ── Passwords (encrypt this file with: ansible-vault encrypt group_vars/dc.yml)
+ansible_password:    "Password123"   # Windows Administrator password
+safe_mode_password:  "P@ssw0rd123!"        # AD DS DSRM recovery password
+
+# ── Lab user accounts ─────────────────────────────────────────────────────────
+lab_users:
+  - sam:         attacker
+    given_name:  Lab
+    surname:     Attacker
+    upn:         "attacker@insane.local"
+    password:    "Pass123!"
+    description: "Lab attacker account -- Kali simulation"
+    ou:          "OU=LabUsers,OU=Lab,DC=insane,DC=local"
+
+  - sam:         svc_sql
+    given_name:  SQL
+    surname:     Service
+    upn:         "svc_sql@insane.local"
+    password:    "SqlS3rv1ce!2024"
+    description: "SQL service account (Kerberoasting target)"
+    ou:          "OU=LabServices,OU=Lab,DC=insane,DC=local"
+
+  - sam:         labadmin
+    given_name:  Lab
+    surname:     Admin
+    upn:         "labadmin@insane.local"
+    password:    "LabAdm1n!2024"
+    description: "Lab admin account -- DA for privilege escalation scenarios"
+    ou:          "OU=LabUsers,OU=Lab,DC=insane,DC=local"
+
+# ── SPNs on svc_sql ───────────────────────────────────────────────────────────
+svc_sql_spns:
+  - "MSSQLSvc/sql01.insane.local"
+  - "MSSQLSvc/sql01.insane.local:1433"

@@ -92,7 +92,7 @@ At the end you will see something like:
 ║  Setup Complete                                                  ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Kustainer REST API   http://localhost:8080                      ║
-║  Logstash Beats port  <HOST_IP>:5044  (WinLogBeat target)       ║
+║  Logstash Beats port  <HOST_IP>:5044  (WinLogBeat target)        ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -111,21 +111,142 @@ At the end you will see something like:
 
 ## Windows DC setup
 
-After `./setup.sh` completes, a file `winlogbeat-dc.zip` will be in the project
-root. Copy it to the Windows DC and run as Administrator:
+This section walks you through creating a Windows Server VM, promoting it to a
+Domain Controller, and wiring it up to the lab — all from your Linux machine.
+No PowerShell knowledge required.
+
+---
+
+### Step 1 — Create a Windows Server VM
+
+> **Important:** You need **Windows Server**, not a regular Windows desktop
+> (Windows 10/11). Only Windows Server can be promoted to a Domain Controller.
+> Windows Server 2019 or 2022 are both fine.
+
+1. Create a new VM in your hypervisor (Proxmox, VMware, VirtualBox, Hyper-V, etc.)
+2. Mount a **Windows Server 2019 or 2022** ISO and install it
+   - Choose **"Server with Desktop Experience"** when the installer asks — this
+     gives you a normal desktop instead of a command-line-only install
+   - Set the **Administrator password** to something you'll remember — you'll
+     need it in Step 3
+3. Make sure the VM is on the **same network** as your Linux machine
+   (the one running Docker / `setup.sh`)
+4. Note down the VM's **IP address** — you'll need it shortly
+   - You can find it in the VM's desktop: open PowerShell and type `ipconfig`
+
+---
+
+### Step 2 — Enable WinRM on the Windows Server VM
+
+Ansible talks to Windows over **WinRM** (Windows Remote Management). You need
+to enable it once on the VM before Ansible can do anything.
+
+On the Windows Server VM, open **PowerShell as Administrator** (right-click the
+Start menu → "Windows PowerShell (Admin)") and run:
 
 ```powershell
-# Expand-Archive on the DC, then:
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+winrm set winrm/config/service/auth '@{Ntlm="true"}'
+netsh advfirewall firewall add rule name="WinRM-HTTP" protocol=TCP dir=in localport=5985 action=allow
+```
+
+That's the only thing you need to do on the Windows VM. Everything else is
+done from your Linux machine.
+
+---
+
+### Step 3 — Configure the Ansible inventory
+
+Back on your Linux machine, open `ansible/inventory.ini` and replace the
+placeholder IP with the Windows Server VM's actual IP address:
+
+```ini
+[dc]
+192.168.68.XXX   # <-- put your Windows Server IP here
+```
+
+Then open `ansible/group_vars/dc.yml` and fill in the Administrator password
+you set during the Windows install:
+
+```yaml
+ansible_password: "YourAdminPassword"   # <-- change this
+```
+
+Everything else in that file (domain name, user accounts, passwords) can be
+left as-is for the lab.
+
+---
+
+### Step 4 — Install Ansible and its Windows modules
+
+If you don't have Ansible installed yet:
+
+```bash
+pip3 install --user ansible pywinrm
+```
+
+Then install the required Ansible collections:
+
+```bash
+ansible-galaxy collection install -r ansible/requirements.yml
+```
+
+---
+
+### Step 5 — Run the playbook
+
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml
+```
+
+The playbook will automatically:
+
+| Step | What happens |
+|------|--------------|
+| 1a | Rename the computer to `Kql-lab-DC` and reboot if needed |
+| 1b | Install the AD DS, DNS, and GPMC Windows features |
+| 1c | Promote the server to Domain Controller (`insane.local`) and reboot |
+| 2a | Create the OU structure (`Lab / LabUsers / LabServices / LabComputers`) |
+| 2b | Create lab user accounts (`attacker`, `svc_sql`, `labadmin`) |
+| 2c | Set SPNs on `svc_sql` (makes it a Kerberoasting target) |
+| 2d | Force RC4-only encryption on `svc_sql` (generates 0x17 tickets in event 4769) |
+| 2e | Relax the domain password policy (allows simple lab passwords) |
+| 2f–g | Configure DNS forwarders + reverse zone |
+| 2h–k | Open firewall rules, enable WinRM, disable IE ESC, disable domain firewall |
+
+The whole run takes about **5–10 minutes** (most of that is the DC promotion reboot).
+You can leave it running and come back — it will reconnect automatically after
+the reboot.
+
+When it finishes you'll see:
+
+```
+DC Lab Setup COMPLETE
+Domain : insane.local (INSANE)
+...
+```
+
+---
+
+### Step 6 — Install WinLogBeat on the DC
+
+After `./setup.sh` completes on your Linux machine, a file `winlogbeat-dc.zip`
+will be in the project root. Copy it to the Windows DC and run as Administrator:
+
+```powershell
+# On the DC — expand the zip, then:
 Set-ExecutionPolicy Bypass -Scope Process -Force
 cd winlogbeat
-.\install-winlogbeat.ps1 -LogstashHost <HOST_IP>
+.\install-winlogbeat.ps1 -LogstashHost <YOUR_LINUX_IP>
 ```
+
+Replace `<YOUR_LINUX_IP>` with the IP of your Linux machine (the one running Docker).
 
 The installer:
 - Downloads and installs WinLogBeat 8.17
-- Deploys `winlogbeat.yml` with your `HOST_IP` substituted in
-- Applies all required audit policies (`auditpol`) and Group Policy registry keys
-- Sets DCSync-detection SACLs on the domain root (for 4662)
+- Deploys `winlogbeat.yml` pointed at your Logstash instance
+- Applies all required audit policies and Group Policy registry keys
+- Sets DCSync-detection SACLs on the domain root (for event 4662)
 - Registers and starts the WinLogBeat Windows service
 
 After ~30 seconds, events should appear in Kustainer:
@@ -213,5 +334,4 @@ Start-Service winlogbeat
 ---
 
 ## todo
-Config script for Windows Server to setup the Domain controler
-Maybe a provisioning script to build the windows VM in proxmox too
+Maybe a provisioning script to build the windows VM in Proxmox too
