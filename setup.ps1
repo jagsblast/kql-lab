@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Idempotent setup for Windows Event Log → Kustainer pipeline (Windows host).
+    Idempotent setup for Windows Event Log -> Kustainer pipeline (Windows host).
 
 .DESCRIPTION
     1. Pre-flight checks (Docker Desktop, AVX2, RAM, disk, vm.max_map_count)
@@ -10,7 +10,7 @@
     4. Creates database schema, table, mapping, and streaming ingest policy
     5. Sends a test event to verify end-to-end ingest
 
-    Re-run safely at any time — all schema commands are idempotent.
+    Re-run safely at any time - all schema commands are idempotent.
 
 .NOTES
     Requires: Docker Desktop for Windows (WSL2 backend), PowerShell 5.1+
@@ -25,7 +25,7 @@ $ADX_URL      = 'http://localhost:8080'
 $DB           = 'NetDefaultDB'
 $MAX_WAIT_SEC = 180
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 function log  { param($m) Write-Host "[setup] $m" -ForegroundColor Green  }
 function warn { param($m) Write-Host "[ warn] $m" -ForegroundColor Yellow }
 function info { param($m) Write-Host "[ info] $m" -ForegroundColor Cyan   }
@@ -35,7 +35,7 @@ function fail {
     exit 1
 }
 
-# ── Load .env ─────────────────────────────────────────────────────────────────
+# -- Load .env -----------------------------------------------------------------
 $envFile = Join-Path $ScriptDir '.env'
 if (Test-Path $envFile) {
     Get-Content $envFile | ForEach-Object {
@@ -50,14 +50,14 @@ $DATA_WARN_GB        = if ($env:DATA_WARN_GB)        { [double]$env:DATA_WARN_GB
 $DATA_MIN_FREE_GB    = if ($env:DATA_MIN_FREE_GB)    { [double]$env:DATA_MIN_FREE_GB }  else { 1.0 }
 
 Write-Host ''
-Write-Host '══════════════════════════════════════════════════════════════════' -ForegroundColor Cyan
-Write-Host '  Windows Event Logs → Kustainer — Setup (Windows host)'          -ForegroundColor Cyan
-Write-Host '══════════════════════════════════════════════════════════════════' -ForegroundColor Cyan
+Write-Host '==================================================================' -ForegroundColor Cyan
+Write-Host '  Windows Event Logs -> Kustainer - Setup (Windows host)'          -ForegroundColor Cyan
+Write-Host '==================================================================' -ForegroundColor Cyan
 Write-Host ''
 
-# ── 0. Pre-flight ─────────────────────────────────────────────────────────────
+# -- 0. Pre-flight -------------------------------------------------------------
 
-# AVX2 — libKusto.NativeInfra.so requires AVX2; crashes instantly without it
+# AVX2 - libKusto.NativeInfra.so requires AVX2; crashes instantly without it
 try {
     # Works on PowerShell 7 / .NET 5+
     Add-Type -TypeDefinition @'
@@ -65,21 +65,21 @@ using System.Runtime.Intrinsics.X86;
 public static class CpuCheck { public static bool HasAvx2 => Avx2.IsSupported; }
 '@ -ErrorAction Stop
     if (-not [CpuCheck]::HasAvx2) {
-        fail "AVX2 not available on this CPU — Kustainer requires AVX2.`nEnsure you are running on a physical host or a VM with CPU passthrough enabled."
+        fail "AVX2 not available on this CPU - Kustainer requires AVX2.`nEnsure you are running on a physical host or a VM with CPU passthrough enabled."
     }
-    info "AVX2: present — OK."
+    info "AVX2: present - OK."
 } catch {
-    warn "Could not verify AVX2 via .NET intrinsics (requires PowerShell 7+). Proceeding — will fail at container start if AVX2 is missing."
+    warn "Could not verify AVX2 via .NET intrinsics (requires PowerShell 7+). Proceeding - will fail at container start if AVX2 is missing."
 }
 
 # RAM
 $totalRAMGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
 if ($totalRAMGB -lt 4) {
-    fail "Only ${totalRAMGB} GB RAM — Kustainer requires at least 4 GB (6 GB+ recommended)."
+    fail "Only ${totalRAMGB} GB RAM - Kustainer requires at least 4 GB (6 GB+ recommended)."
 } elseif ($totalRAMGB -lt 6) {
-    warn "RAM: ${totalRAMGB} GB — Kustainer may be slow or unstable below 6 GB."
+    warn "RAM: ${totalRAMGB} GB - Kustainer may be slow or unstable below 6 GB."
 } else {
-    info "RAM: ${totalRAMGB} GB — OK."
+    info "RAM: ${totalRAMGB} GB - OK."
 }
 
 # Docker Desktop
@@ -101,11 +101,11 @@ $driveLetter = (Split-Path -Qualifier $ScriptDir).TrimEnd(':')
 $disk   = Get-PSDrive -Name $driveLetter
 $freeGB = [math]::Round($disk.Free / 1GB, 1)
 if ($freeGB -lt $DATA_MIN_FREE_GB) {
-    fail "Only ${freeGB} GB free — need at least ${DATA_MIN_FREE_GB} GB."
+    fail "Only ${freeGB} GB free - need at least ${DATA_MIN_FREE_GB} GB."
 } elseif ($freeGB -lt $DATA_WARN_GB) {
     warn "Low disk space: ${freeGB} GB free (threshold: ${DATA_WARN_GB} GB). Monitor closely."
 } else {
-    info "Disk space: ${freeGB} GB free — OK."
+    info "Disk space: ${freeGB} GB free - OK."
 }
 
 # Data directory size
@@ -115,28 +115,28 @@ if (Test-Path $dataDir) {
         (Get-ChildItem $dataDir -Recurse -ErrorAction SilentlyContinue |
          Measure-Object -Property Length -Sum).Sum / 1GB, 1)
     if ($dataSizeGB -gt $DATA_MAX_GB) {
-        warn ".\data\ is ${dataSizeGB} GB — over the ${DATA_MAX_GB} GB cap. Run .\teardown.ps1 --purge to reclaim space."
+        warn ".\data\ is ${dataSizeGB} GB - over the ${DATA_MAX_GB} GB cap. Run .\teardown.ps1 --purge to reclaim space."
     } else {
         info "Data directory: ${dataSizeGB} GB / ${DATA_MAX_GB} GB cap."
     }
 }
 info "Retention policy: $DATA_RETENTION_DAYS days (set DATA_RETENTION_DAYS in .env to change)."
 
-# vm.max_map_count — Docker Desktop uses WSL2; the kernel param must be set there.
+# vm.max_map_count - Docker Desktop uses WSL2; the kernel param must be set there.
 # Runtime: wsl -d docker-desktop; Persistent: ~/.wslconfig kernelCommandLine.
 $MIN_MAP = 262144
 $TARGET_MAP = 524288
 try {
     $curMap = [int](wsl -d docker-desktop sysctl -n vm.max_map_count 2>$null)
     if ($curMap -lt $MIN_MAP) {
-        warn "vm.max_map_count is $curMap (need >= $MIN_MAP) — fixing now ..."
+        warn "vm.max_map_count is $curMap (need >= $MIN_MAP) - fixing now ..."
         wsl -d docker-desktop sysctl -w vm.max_map_count=$TARGET_MAP 2>$null | Out-Null
         info "vm.max_map_count set to $TARGET_MAP for this session."
     } else {
-        info "vm.max_map_count: $curMap — OK."
+        info "vm.max_map_count: $curMap - OK."
     }
 } catch {
-    warn "Could not set vm.max_map_count via WSL2 — Kustainer may crash if it is too low."
+    warn "Could not set vm.max_map_count via WSL2 - Kustainer may crash if it is too low."
 }
 
 # Persist vm.max_map_count across Docker Desktop restarts via .wslconfig
@@ -160,18 +160,18 @@ if (Test-Path $wslConfig) {
 
 Set-Location $ScriptDir
 
-# ── 1. Directory layout ───────────────────────────────────────────────────────
+# -- 1. Directory layout -------------------------------------------------------
 log "Ensuring directory layout ..."
 @('data', 'logstash\pipeline', 'logstash\config', 'winlogbeat', 'schemas') | ForEach-Object {
     New-Item -ItemType Directory -Path (Join-Path $ScriptDir $_) -Force | Out-Null
 }
 
-# ── 2. Start the stack ────────────────────────────────────────────────────────
+# -- 2. Start the stack --------------------------------------------------------
 log "Starting ADX + Logstash via docker compose ..."
 docker compose up -d
 Write-Host ''
 
-# ── 3. Wait for Kustainer ────────────────────────────────────────────────────
+# -- 3. Wait for Kustainer ----------------------------------------------------
 log "Waiting for Kustainer to become healthy (max ${MAX_WAIT_SEC}s) ..."
 $elapsed = 0
 $ready   = $false
@@ -193,7 +193,7 @@ if (-not $ready) { fail "Kustainer did not become ready within ${MAX_WAIT_SEC}s.
 log "Kustainer is ready."
 Write-Host ''
 
-# ── 4. Schema init ────────────────────────────────────────────────────────────
+# -- 4. Schema init ------------------------------------------------------------
 log "Initialising schema in Kustainer ..."
 
 function Invoke-KustoMgmt {
@@ -243,22 +243,22 @@ Invoke-KustoMgmt -Label 'policy    streaming ingestion' -Csl (
 
 # Retention policy
 $retJson = "{`"SoftDeletePeriod`":`"${DATA_RETENTION_DAYS}.00:00:00`",`"Recoverability`":`"Disabled`"}".Replace("'", "''")
-Invoke-KustoMgmt -Label "policy    retention → $DATA_RETENTION_DAYS days" -Csl (
+Invoke-KustoMgmt -Label "policy    retention -> $DATA_RETENTION_DAYS days" -Csl (
     ".alter table WindowsEvents policy retention @'$retJson'")
 
 # Cache policy
 $cacheDays = [math]::Min($DATA_RETENTION_DAYS, 3)
-Invoke-KustoMgmt -Label "policy    hot cache → $cacheDays days" -Csl (
+Invoke-KustoMgmt -Label "policy    hot cache -> $cacheDays days" -Csl (
     ".alter table WindowsEvents policy caching hot = ${cacheDays}d")
 
 Write-Host ''
 Write-Host '  Schema initialisation complete.'
 Write-Host ''
 
-# ── 5. Test ingest via relay ─────────────────────────────────────────────────
+# -- 5. Test ingest via relay -------------------------------------------------
 log "Testing ingest via relay container ..."
 Start-Sleep -Seconds 3
-$testEvent = '{"@timestamp":"2026-03-20T00:00:00.000Z","winlog":{"computer_name":"setup-test","event_id":1,"channel":"SetupTest","provider_name":"KQL-Lab-Setup","event_data":{"note":"setup verification"}},"log":{"level":"information"},"message":"Setup verification event — safe to delete"}'
+$testEvent = '{"@timestamp":"2026-03-20T00:00:00.000Z","winlog":{"computer_name":"setup-test","event_id":1,"channel":"SetupTest","provider_name":"KQL-Lab-Setup","event_data":{"note":"setup verification"}},"log":{"level":"information"},"message":"Setup verification event - safe to delete"}'
 try {
     $r = Invoke-WebRequest -Uri 'http://localhost:9001/ingest' -Method Post `
         -ContentType 'application/json' -Body $testEvent -ErrorAction Stop
@@ -269,15 +269,15 @@ try {
 }
 Write-Host ''
 
-# ── 6. Package winlogbeat zip ─────────────────────────────────────────────────
+# -- 6. Package winlogbeat zip -------------------------------------------------
 log "Packaging winlogbeat-dc.zip ..."
 $zipDest = Join-Path $ScriptDir 'winlogbeat-dc.zip'
 if (Test-Path $zipDest) { Remove-Item $zipDest -Force }
 Compress-Archive -Path (Join-Path $ScriptDir 'winlogbeat\*') -DestinationPath $zipDest
-log "winlogbeat-dc.zip ready — copy this to your Windows DC."
+log "winlogbeat-dc.zip ready - copy this to your Windows DC."
 Write-Host ''
 
-# ── 7. Summary ────────────────────────────────────────────────────────────────
+# -- 7. Summary ----------------------------------------------------------------
 $hostIP = (Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.PrefixOrigin -ne 'WellKnown' } |
     Sort-Object InterfaceMetric |
