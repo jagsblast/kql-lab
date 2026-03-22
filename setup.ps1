@@ -86,7 +86,7 @@ if ($totalRAMGB -lt 4) {
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     fail "docker not found.`nInstall Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
 }
-# Use 'docker ps' — simpler than 'docker info' and less noisy on stderr.
+# Use 'docker ps' -- simpler than 'docker info' and less noisy on stderr.
 # Capture output and exit code in isolation to avoid $LASTEXITCODE bleed from prior commands.
 $dockerTest = $null
 $dockerTest = & cmd /c "docker ps >nul 2>&1 && echo OK || echo FAIL" 2>&1
@@ -284,15 +284,96 @@ log "Packaging winlogbeat-dc.zip ..."
 $zipDest = Join-Path $ScriptDir 'winlogbeat-dc.zip'
 if (Test-Path $zipDest) { Remove-Item $zipDest -Force }
 Compress-Archive -Path (Join-Path $ScriptDir 'winlogbeat\*') -DestinationPath $zipDest
-log "winlogbeat-dc.zip ready - copy this to your Windows DC."
+log "winlogbeat-dc.zip ready (for manual DC deployment - see step 7 for automated option)."
 Write-Host ''
 
-# -- 7. Summary ----------------------------------------------------------------
+# Detect host IP - used by DC provisioning and summary
 $hostIP = (Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.PrefixOrigin -ne 'WellKnown' } |
     Sort-Object InterfaceMetric |
     Select-Object -First 1).IPAddress
 
+# -- 7. DC provisioning -------------------------------------------------------
+$DC_HOST = if ($env:DC_HOST) { $env:DC_HOST } else { $null }
+$DC_USER = if ($env:DC_USER) { $env:DC_USER } else { 'Administrator' }
+$dcProvisionOk = $false
+
+if (-not $DC_HOST) {
+    info 'DC_HOST not set in .env - skipping automated DC provisioning.'
+    info '  Add DC_HOST=<ip-or-hostname>  (and optionally DC_USER=<username>)  to .env and re-run.'
+} else {
+    log "Provisioning DC at $DC_HOST ..."
+
+    # Add DC to PSRemoting TrustedHosts on this machine (required for NTLM auth to IP/hostname)
+    try {
+        $curTrusted = (Get-Item 'WSMan:\localhost\Client\TrustedHosts' -ErrorAction Stop).Value
+        if ($curTrusted -ne '*' -and $curTrusted -notmatch [regex]::Escape($DC_HOST)) {
+            $newTrusted = if ($curTrusted) { "$curTrusted,$DC_HOST" } else { $DC_HOST }
+            Set-Item 'WSMan:\localhost\Client\TrustedHosts' -Value $newTrusted -Force -ErrorAction Stop
+        }
+    } catch {
+        warn "Could not update WSMan TrustedHosts: $_ -- PSRemoting may fail if DC is not in a trusted zone."
+    }
+
+    $dcCred = Get-Credential -UserName $DC_USER `
+                  -Message "Enter DC admin credentials for $DC_HOST  (e.g. Administrator or DOMAIN\Administrator)"
+
+    $sess = $null
+    try {
+        $sopts = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck `
+                                     -OperationTimeout 900000
+        $sess  = New-PSSession -ComputerName $DC_HOST -Credential $dcCred `
+                     -Authentication Negotiate -SessionOption $sopts -ErrorAction Stop
+        log '  PSRemoting session established.'
+
+        # Create staging directory on DC
+        $remoteDir = 'C:\setup-dc-lab'
+        Invoke-Command -Session $sess -ScriptBlock {
+            param($d)
+            if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        } -ArgumentList $remoteDir
+
+        # Copy scripts to DC
+        log '  Copying scripts to DC ...'
+        foreach ($f in @('setup-dc.ps1', 'install-winlogbeat.ps1', 'winlogbeat.yml')) {
+            Copy-Item -Path (Join-Path $ScriptDir "winlogbeat\$f") `
+                      -Destination "$remoteDir\$f" `
+                      -ToSession $sess -Force
+        }
+        log "  Scripts staged at $remoteDir on DC."
+
+        # Phase 2: create AD lab objects (OUs, users, SPNs, RC4, password policy, DNS, WinRM, firewall)
+        log '  Running AD lab setup on DC (Phase 2: OUs, users, SPNs, RC4, policy, DNS) ...'
+        Invoke-Command -Session $sess -ScriptBlock {
+            param($d, $lsHost)
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            & "$d\setup-dc.ps1" -Phase2 -LogstashHost $lsHost
+        } -ArgumentList $remoteDir, $hostIP
+        log '  AD lab objects provisioned.'
+
+        # Install WinLogBeat on DC (downloads ~80 MB from elastic.co - takes a few minutes)
+        log "  Installing WinLogBeat on DC (Logstash target: ${hostIP}:5044) ..."
+        log '  Downloading ~80 MB from elastic.co - may take a few minutes ...'
+        Invoke-Command -Session $sess -ScriptBlock {
+            param($d, $lsHost)
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            & "$d\install-winlogbeat.ps1" -LogstashHost $lsHost
+        } -ArgumentList $remoteDir, $hostIP
+        log '  WinLogBeat installed and started on DC.'
+
+        $dcProvisionOk = $true
+
+    } catch {
+        warn "DC provisioning failed: $_"
+        warn '  Ensure WinRM is enabled on the DC:  winrm quickconfig -q'
+        warn '  Then re-run setup.ps1, or provision manually using winlogbeat-dc.zip.'
+    } finally {
+        if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue }
+    }
+}
+Write-Host ''
+
+# -- 8. Summary ----------------------------------------------------------------
 $sep = '=' * 66
 Write-Host $sep -ForegroundColor Green
 Write-Host '  Setup Complete' -ForegroundColor Green
@@ -302,11 +383,24 @@ Write-Host "  Logstash Beats port  ${hostIP}:5044  (WinLogBeat target)" -Foregro
 Write-Host '  Database             NetDefaultDB' -ForegroundColor Green
 Write-Host '  Table                WindowsEvents' -ForegroundColor Green
 Write-Host $sep -ForegroundColor Green
-Write-Host '  Windows DC steps (run as Administrator):' -ForegroundColor Green
-Write-Host '   1.  Copy winlogbeat-dc.zip to the DC and extract it' -ForegroundColor Green
-Write-Host ('   2.  Run:  .\install-winlogbeat.ps1 -LogstashHost ' + $hostIP) -ForegroundColor Green
-Write-Host '   3.  Wait ~30 s, then in Kustainer:' -ForegroundColor Green
-Write-Host '         WindowsEvents | take 10' -ForegroundColor Green
+if ($dcProvisionOk) {
+    Write-Host '  DC provisioned       AD objects + WinLogBeat installed [OK]' -ForegroundColor Green
+    Write-Host '  Wait ~30 s then query Kustainer:' -ForegroundColor Green
+    Write-Host '    WindowsEvents | take 10' -ForegroundColor Green
+} elseif ($DC_HOST) {
+    Write-Host '  DC provisioning      FAILED - check errors above and re-run setup.ps1' -ForegroundColor Yellow
+    Write-Host '  Manual fallback: copy winlogbeat-dc.zip to the DC and run:' -ForegroundColor Yellow
+    Write-Host ('    .\setup-dc.ps1 -Phase2 -LogstashHost ' + $hostIP) -ForegroundColor Yellow
+    Write-Host ('    .\install-winlogbeat.ps1 -LogstashHost ' + $hostIP) -ForegroundColor Yellow
+} else {
+    Write-Host '  Windows DC steps (run as Administrator on the DC):' -ForegroundColor Green
+    Write-Host '   1.  Copy winlogbeat-dc.zip to the DC and extract it' -ForegroundColor Green
+    Write-Host ('   2.  Run:  .\setup-dc.ps1 -Phase2 -LogstashHost ' + $hostIP) -ForegroundColor Green
+    Write-Host ('   3.  Run:  .\install-winlogbeat.ps1 -LogstashHost ' + $hostIP) -ForegroundColor Green
+    Write-Host '   4.  Wait ~30 s, then in Kustainer:' -ForegroundColor Green
+    Write-Host '         WindowsEvents | take 10' -ForegroundColor Green
+    Write-Host '  Tip: add DC_HOST=<ip> to .env and re-run to automate DC provisioning.' -ForegroundColor Green
+}
 Write-Host $sep -ForegroundColor Green
 Write-Host '  Useful commands:' -ForegroundColor Green
 Write-Host '   docker logs -f logstash   -- watch Logstash output' -ForegroundColor Green
