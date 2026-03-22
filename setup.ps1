@@ -91,7 +91,13 @@ try {
     $dockerInfo = & docker info 2>&1
 } catch { }
 if ($LASTEXITCODE -ne 0 -or $dockerInfo -match 'error during connect') {
-    fail "Cannot connect to Docker Desktop. Make sure Docker Desktop is running (check the system tray icon).`nError: $($dockerInfo | Select-Object -First 1)"
+    $errLine = ($dockerInfo | Select-Object -First 1)
+    $hint = if ($errLine -match 'LinuxEngine|linux') {
+        "Docker Desktop is in Windows containers mode.`n  Right-click the tray icon -> 'Switch to Linux containers...' then retry."
+    } else {
+        "Docker Desktop is not ready. Wait for the tray icon to stop animating, then retry."
+    }
+    fail "Cannot connect to Docker Desktop.`n  $hint`n  Raw error: $errLine"
 }
 & docker compose version 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
