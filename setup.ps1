@@ -287,6 +287,10 @@ Compress-Archive -Path (Join-Path $ScriptDir 'winlogbeat\*') -DestinationPath $z
 log "winlogbeat-dc.zip ready (for manual DC deployment - see step 7 for automated option)."
 Write-Host ''
 
+# -- 7. DC provisioning -------------------------------------------------------
+$DC_HOST = if ($env:DC_HOST) { $env:DC_HOST } else { $null }
+$DC_USER = if ($env:DC_USER) { $env:DC_USER } else { 'Administrator' }
+
 # Detect host IP - used by DC provisioning and summary.
 # When DC_HOST is set, ask Windows which source IP it would use to reach the DC
 # (Find-NetRoute picks the correct interface even when VPNs are active).
@@ -304,10 +308,6 @@ if (-not $hostIP) {
         Sort-Object InterfaceMetric |
         Select-Object -First 1).IPAddress
 }
-
-# -- 7. DC provisioning -------------------------------------------------------
-$DC_HOST = if ($env:DC_HOST) { $env:DC_HOST } else { $null }
-$DC_USER = if ($env:DC_USER) { $env:DC_USER } else { 'Administrator' }
 $dcProvisionOk = $false
 
 if (-not $DC_HOST) {
