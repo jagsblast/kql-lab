@@ -260,7 +260,7 @@ Takes about **5-10 minutes** (mostly the DC promotion reboot).
 
 > Download: https://aka.ms/ke
 
-1. Open **Kusto Explorer** (Windows) → **Add Connection**
+1. Open **Kusto Explorer** (Windows) -> **Add Connection**
 2. Cluster URI: `http://<HOST_IP>:8080`
 3. Database: `NetDefaultDB`
 4. Run any query from `queries/`
@@ -270,7 +270,7 @@ Takes about **5-10 minutes** (mostly the DC promotion reboot).
 ## Storage limits
 
 By default `setup.sh` configures a **7-day retention policy** and a **5 GB cap** on `./data/`.
-ADX automatically drops extents older than the retention window — no manual cleanup needed.
+ADX automatically drops extents older than the retention window -- no manual cleanup needed.
 
 Configure both in `.env` (copy from `.env.example`):
 
