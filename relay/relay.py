@@ -37,8 +37,12 @@ def ingest_batch(events: list) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60):
-        pass
+    try:
+        with urllib.request.urlopen(req, timeout=60):
+            pass
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:500]
+        raise Exception(f"HTTP Error {e.code}: {e.reason} -- {detail}") from None
 
 
 def worker() -> None:
