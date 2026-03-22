@@ -5,107 +5,164 @@ A self-contained lab for practising KQL (Kusto Query Language) against real Wind
 
 ```
 Windows DC (WinLogBeat)
-        │  Beats/5044
-        ▼
-   Logstash  ──►  relay  ──►  Kustainer (ADX)
+        |  Beats/5044
+        v
+   Logstash  -->  relay  -->  Kustainer (ADX)
                                NetDefaultDB.WindowsEvents
 ```
 
 ---
 
-## Prerequisites
+## Quick Start -- Windows (Docker Desktop)
 
-| Requirement | Notes |
+> **This is the easiest way to run the lab.** You just need a Windows 10/11
+> machine with Docker Desktop installed and a Windows Server VM to act as the
+> Domain Controller.  One script does everything.
+
+### What you need before starting
+
+| Thing | Why you need it |
 |---|---|
-| Linux host (x86-64) | Ubuntu 22.04, Debian 12, or Fedora 39+ all work |
-| Docker Engine ≥ 20.10 | `curl -fsSL https://get.docker.com | sh` |
-| Docker Compose plugin | Ships with Docker Desktop; standalone: `apt install docker-compose-plugin` |
-| `python3`, `curl` | Usually pre-installed |
-| ≥ 6 GB free RAM | Kustainer alone uses ~3 GB at rest |
-| Windows Server VM on the same network | The DC that ships event logs — see Step 1 below |
+| Windows 10 or 11 PC (x86-64, 6 GB+ RAM) | This is where Docker runs |
+| [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) | Runs the lab containers |
+| A Windows Server 2019/2022 VM on the same network | Becomes your Domain Controller and ships the event logs |
+
+> **On your CPU:** Kustainer requires a CPU feature called **AVX2**.
+> Physical machines made after ~2013 have it.  If you are running inside a VM,
+> make sure CPU passthrough / hardware virtualisation is enabled in your
+> hypervisor settings.
 
 ---
 
-## Windows DC setup
+### Step 1 -- Install Docker Desktop (skip if you have it already)
 
-This section walks you through creating a Windows Server VM, promoting it to a
-Domain Controller, and wiring it up to the lab — all from your Linux machine.
-No PowerShell knowledge required.
-
----
-
-### Step 1 — Create a Windows Server VM
-
-> **Important:** You need **Windows Server**, not a regular Windows desktop
-> (Windows 10/11). Only Windows Server can be promoted to a Domain Controller.
-> Windows Server 2019 or 2022 are both fine.
-
-1. Create a new VM in your hypervisor (Proxmox, VMware, VirtualBox, Hyper-V, etc.)
-2. Mount a **Windows Server 2019 or 2022** ISO and install it
-   - Choose **"Server with Desktop Experience"** when the installer asks — this
-     gives you a normal desktop instead of a command-line-only install
-   - Set the **Administrator password** to something you'll remember — you'll
-     need it in Step 3
-3. Make sure the VM is on the **same network** as your Linux machine
-   (the one running Docker / `setup.sh`)
-4. Note down the VM's **IP address** — you'll need it shortly
-   - You can find it in the VM's desktop: open PowerShell and type `ipconfig`
+1. Download Docker Desktop from **https://docs.docker.com/desktop/install/windows-install/**
+2. Run the installer.  When it asks, tick **"Use WSL 2 instead of Hyper-V"** -- this is the default, just leave it ticked
+3. Restart your computer when the installer tells you to
+4. After restarting, open Docker Desktop from the Start menu and wait until the whale icon in the taskbar stops animating -- that means Docker is ready
 
 ---
 
-### Step 2 — Enable WinRM on the Windows Server VM
+### Step 2 -- Get the lab files
 
-Ansible talks to Windows over **WinRM** (Windows Remote Management). You need
-to enable it once on the VM before Ansible can do anything.
+Open **PowerShell as Administrator**:
+- Press the **Start** button
+- Type `powershell`
+- Right-click **"Windows PowerShell"** and choose **"Run as administrator"**
+- Click **Yes** on the popup
 
-On the Windows Server VM, open **PowerShell as Administrator** (right-click the
-Start menu → "Windows PowerShell (Admin)") and run:
+Then paste this command and press Enter:
 
 ```powershell
-Enable-PSRemoting -Force -SkipNetworkProfileCheck
-winrm set winrm/config/service/auth '@{Ntlm="true"}'
-netsh advfirewall firewall add rule name="WinRM-HTTP" protocol=TCP dir=in localport=5985 action=allow
+git clone https://github.com/jagsblast/kql-lab.git "$env:USERPROFILE\kql-lab"
+cd "$env:USERPROFILE\kql-lab"
 ```
 
-That's the only thing you need to do on the Windows VM. Everything else is
-done from your Linux machine.
+> **Don't have git?** Download it from **https://git-scm.com/download/win**, install it, then close and re-open PowerShell and try again.
 
 ---
 
-### Step 3 — Configure the Ansible inventory
+### Step 3 -- Tell the script where your DC is
 
-Back on your Linux machine, open `ansible/inventory.ini` and replace the
-placeholder IP with the Windows Server VM's actual IP address:
+Your Windows Server VM needs to already exist and be turned on.  You need its **IP address** -- open PowerShell on the VM and type `ipconfig` to find it.
 
-```ini
-[dc]
-192.168.68.XXX   # <-- put your Windows Server IP here
+Back in the `kql-lab` folder on your Windows machine, create a file called `.env`:
+
+```powershell
+# Replace 192.168.1.50 with your DC's actual IP address
+'DC_HOST=192.168.1.50' | Set-Content .env
 ```
 
-Then open `ansible/group_vars/dc.yml` and fill in the Administrator password
-you set during the Windows install:
+That's the only setting you need.  The script uses `Administrator` as the username by default.  If you want a different username add it too:
 
-```yaml
-ansible_password: "YourAdminPassword"   # <-- change this
-```
-
-Everything else in that file (domain name, user accounts, passwords) can be
-left as-is for the lab.
-
----
-
-### Step 4 — Install Ansible and its Windows modules
-
-If you don't have Ansible installed yet:
-
-```bash
-pip3 install --user ansible pywinrm
-ansible-galaxy collection install -r ansible/requirements.yml
+```powershell
+Add-Content .env 'DC_USER=Administrator'
 ```
 
 ---
 
-## Quick start (Linux host)
+### Step 4 -- Run the setup script
+
+Still in the same Administrator PowerShell window, run:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+.\setup.ps1
+```
+
+The script will:
+1. Check your machine has everything it needs (AVX2, RAM, Docker)
+2. Start the **Kustainer (ADX)**, **Logstash**, and **relay** containers
+3. Create the database table and ingest pipeline automatically
+4. Send a test event to make sure the pipeline works
+5. Pop up a **password prompt** -- enter the Administrator password for your DC
+6. Connect to the DC over PSRemoting and automatically:
+   - Create the AD lab objects (OUs, users, SPNs, RC4 encryption, password policy)
+   - Install and start WinLogBeat so event logs start flowing
+
+The whole thing takes about **3-5 minutes** (plus a few minutes for WinLogBeat to download from the internet).
+
+---
+
+### Step 5 -- You're done!
+
+When the script finishes you'll see something like:
+
+```
+==================================================================
+  Setup Complete
+==================================================================
+  Kustainer REST API   http://localhost:8080
+  Logstash Beats port  192.168.1.x:5044  (WinLogBeat target)
+  Database             NetDefaultDB
+  Table                WindowsEvents
+==================================================================
+  DC provisioned       AD objects + WinLogBeat installed [OK]
+  Wait ~30 s then query Kustainer:
+    WindowsEvents | take 10
+==================================================================
+```
+
+After about 30 seconds, open your browser to **http://localhost:8080** and run:
+
+```kql
+WindowsEvents | take 10
+```
+
+You should see real Windows event logs appearing. If you see rows -- congratulations, the lab is working!
+
+---
+
+### Troubleshooting (Windows)
+
+| Problem | Fix |
+|---|---|
+| `docker: command not found` | Open Docker Desktop from the Start menu and wait for it to finish loading |
+| `Cannot connect to Docker Desktop` | Docker is still starting -- wait for the whale icon to stop animating in the taskbar |
+| `AVX2 not available` | Enable CPU passthrough in your hypervisor, or run on a physical machine |
+| DC password prompt pops up and fails | Make sure the DC IP is correct and WinRM is enabled -- see note below |
+| `winrm quickconfig` error on DC | Run it in PowerShell as Administrator on the DC: `winrm quickconfig -q` |
+| Setup worked but no events appear | Wait 30-60 seconds, then check `docker logs -f logstash` |
+
+> **WinRM note:** If the DC has never had WinRM enabled, run this **on the DC** in an
+> Administrator PowerShell before running `setup.ps1`:
+> ```powershell
+> winrm quickconfig -q
+> ```
+
+---
+
+### To stop the lab
+
+```powershell
+.\teardown.ps1            # stop containers, keep all data
+.\teardown.ps1 --purge    # stop + delete all ingested data
+```
+
+---
+---
+
+## Quick Start -- Linux host
 
 ```bash
 git clone https://github.com/jagsblast/kql-lab.git kql-lab
@@ -119,90 +176,83 @@ chmod +x setup.sh teardown.sh
 2. Wait for Kustainer to become healthy
 3. Create the `WindowsEvents` table, JSON ingestion mapping, and streaming policy
 4. Send a test event end-to-end to confirm the pipeline works
-5. Package `winlogbeat/` into `winlogbeat-dc.zip` (manual fallback)
-6. **If Ansible is installed and `ansible/inventory.ini` has a DC IP set**, prompt you to run the full DC provisioning playbook right now — this promotes the DC, configures all lab objects, and installs WinLogBeat in one go
-7. Print the summary
-
-At the end you will see something like:
-
-```
-╔══════════════════════════════════════════════════════════════════╗
-║  Setup Complete                                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Kustainer REST API   http://localhost:8080                      ║
-║  Logstash Beats port  <HOST_IP>:5044  (WinLogBeat target)        ║
-╚══════════════════════════════════════════════════════════════════╝
-```
+5. Package `winlogbeat/` into `winlogbeat-dc.zip` for deploying to the DC
 
 ---
 
-### Step 5 — Run the Ansible playbook
+### DC setup (Linux path)
 
-When `setup.sh` finishes it will ask:
+The Linux path uses **Ansible** to provision the DC remotely.
 
+#### Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Ubuntu 22.04 / Debian 12 / Fedora 39+ (x86-64) | |
+| Docker Engine >= 20.10 | `curl -fsSL https://get.docker.com \| sh` |
+| Docker Compose plugin | `apt install docker-compose-plugin` |
+| >= 6 GB free RAM | Kustainer uses ~3 GB at rest |
+| Windows Server 2019/2022 VM on the same network | |
+
+#### Step A -- Enable WinRM on the DC
+
+On the Windows Server VM, open **PowerShell as Administrator** and run:
+
+```powershell
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+winrm set winrm/config/service/auth '@{Ntlm="true"}'
+netsh advfirewall firewall add rule name="WinRM-HTTP" protocol=TCP dir=in localport=5985 action=allow
 ```
-Run Ansible DC provisioning now? [y/N]
+
+#### Step B -- Configure Ansible
+
+Edit `ansible/inventory.ini` with the DC's IP:
+
+```ini
+[dc]
+192.168.68.XXX   # <-- your Windows Server IP
 ```
 
-Type `y` and press Enter. You can also run it manually at any time:
+Edit `ansible/group_vars/dc.yml` with the Administrator password:
+
+```yaml
+ansible_password: "YourAdminPassword"
+```
+
+#### Step C -- Install Ansible
+
+```bash
+pip3 install --user ansible pywinrm
+ansible-galaxy collection install -r ansible/requirements.yml
+```
+
+#### Step D -- Run the playbook
 
 ```bash
 ansible-playbook -i ansible/inventory.ini ansible/setup-dc.yml
 ```
 
-The playbook runs three phases automatically:
+The playbook handles everything automatically:
 
 | Step | What happens |
 |------|--------------|
-| 1a | Rename the computer to `Kql-lab-DC` and reboot if needed |
-| 1b | Install the AD DS, DNS, and GPMC Windows features |
-| 1c | Promote the server to Domain Controller (`insane.local`) and reboot |
-| 2a | Create the OU structure (`Lab / LabUsers / LabServices / LabComputers`) |
+| 1a-c | Rename computer, install AD DS/DNS roles, promote to DC, reboot |
+| 2a | Create OU structure (`Lab / LabUsers / LabServices / LabComputers`) |
 | 2b | Create lab user accounts (`attacker`, `svc_sql`, `labadmin`) |
-| 2c | Set SPNs on `svc_sql` (makes it a Kerberoasting target) |
+| 2c | Set SPNs on `svc_sql` (Kerberoasting target) |
 | 2d | Force RC4-only encryption on `svc_sql` (generates 0x17 tickets in event 4769) |
-| 2e | Relax the domain password policy (allows simple lab passwords) |
-| 2f–g | Configure DNS forwarders + reverse zone |
-| 2h–k | Open firewall rules, enable WinRM, disable IE ESC, disable domain firewall |
-| 3a | Copy `install-winlogbeat.ps1` and `winlogbeat.yml` to the DC |
-| 3b | Run the WinLogBeat installer — downloads, configures, and starts the service |
+| 2e | Relax domain password policy |
+| 2f-k | DNS forwarders, firewall rules, WinRM, disable IE ESC |
+| 3a-b | Copy and run WinLogBeat installer on DC |
 
-The whole run takes about **5–10 minutes** (most of that is the DC promotion
-reboot). You can leave it running and come back — Ansible reconnects
-automatically after the reboot.
+Takes about **5-10 minutes** (mostly the DC promotion reboot).
 
-When it finishes you'll see:
-
-```
-DC Lab Setup COMPLETE
-Domain : insane.local (INSANE)
-...
-```
-
-After ~30 seconds, events should be flowing into Kustainer:
-
-```kql
-WindowsEvents | take 10
-```
-
----
-
-### Step 6 — Done
-
-If the Ansible playbook completed successfully, WinLogBeat is already installed
-and running. You don't need to do anything else on the DC.
-
-> **Manual fallback** (if you skipped Ansible or want to reinstall WinLogBeat
-> by hand): `setup.sh` creates `winlogbeat-dc.zip` in the project root. Copy
-> it to the DC, extract it, then run in an **Administrator** PowerShell:
->
+> **Manual fallback:** `setup.sh` creates `winlogbeat-dc.zip` in the project root.
+> Copy it to the DC, extract it, then run as Administrator:
 > ```powershell
 > Set-ExecutionPolicy Bypass -Scope Process -Force
-> cd winlogbeat
 > .\install-winlogbeat.ps1 -LogstashHost <YOUR_LINUX_IP>
 > ```
->
-> Replace `<YOUR_LINUX_IP>` with the IP of your Linux machine.
 
 ---
 
@@ -261,6 +311,13 @@ du -sh ./data/
 
 ## Teardown
 
+**Windows (PowerShell):**
+```powershell
+.\teardown.ps1            # stop containers, keep all data
+.\teardown.ps1 --purge    # stop + delete all ingested data
+```
+
+**Linux (bash):**
 ```bash
 ./teardown.sh            # stop containers, keep all data in ./data/
 ./teardown.sh --purge    # stop + wipe ./data/ (irreversible)
@@ -272,35 +329,39 @@ du -sh ./data/
 
 ```
 .
-├── docker-compose.yml          # ADX + Logstash + relay
-├── setup.sh                    # one-shot idempotent setup (offers Ansible DC provisioning)
-├── teardown.sh                 # stop / purge
-│
-├── ansible/
-│   ├── setup-dc.yml            # playbook: rename → promote DC → lab objects → WinLogBeat
-│   ├── inventory.ini           # put your Windows Server IP here
-│   ├── group_vars/dc.yml       # domain, passwords, users, SPNs — all tunable vars
-│   └── requirements.yml        # ansible.windows + microsoft.ad collections
-│
-├── relay/
-│   ├── Dockerfile
-│   └── relay.py                # Logstash JSON → Kustainer .ingest inline
-│
-├── logstash/
-│   ├── config/logstash.yml
-│   └── pipeline/winlogbeat.conf
-│
-├── schemas/
-│   └── windows_events.kql      # table + mapping + streaming policy DDL
-│
-├── queries/
-│   ├── kerberoasting_detection.kql      # Tier1 burst + Tier2 sensitive SPN
-│   └── kerberoasting_rc4_baseline.kql  # single-event RC4 detector (no thresholds)
-│
-└── winlogbeat/
-    ├── winlogbeat.yml           # collector config (deployed to DC by Ansible)
-    ├── install-winlogbeat.ps1  # DC installer + audit policy script (run by Ansible)
-    └── setup-dc.ps1            # PowerShell fallback (reference only)
++-- docker-compose.yml          # ADX + Logstash + relay
++-- setup.ps1                   # Windows one-shot setup (Docker Desktop + DC provisioning)
++-- teardown.ps1                # Windows stop / purge
++-- setup.sh                    # Linux one-shot setup (Ansible DC provisioning)
++-- teardown.sh                 # Linux stop / purge
+|
++-- ansible/
+|   +-- setup-dc.yml            # playbook: promote DC + lab objects + WinLogBeat
+|   +-- inventory.ini           # put your Windows Server IP here
+|   +-- group_vars/dc.yml       # domain, passwords, users, SPNs -- all tunable
+|   +-- requirements.yml        # ansible.windows + microsoft.ad collections
+|
++-- relay/
+|   +-- Dockerfile
+|   +-- relay.py                # Logstash JSON -> Kustainer ingest
+|
++-- logstash/
+|   +-- config/logstash.yml
+|   +-- pipeline/winlogbeat.conf
+|
++-- schemas/
+|   +-- windows_events.kql      # table + mapping + streaming policy DDL
+|
++-- queries/
+|   +-- kerberoasting_detection.kql      # Tier1 burst + Tier2 sensitive SPN
+|   +-- kerberoasting_rc4_baseline.kql   # single-event RC4 detector
+|   +-- bloodhound_ad_enum.kql           # BloodHound / LDAP enumeration
+|   +-- threatref_enrich.kql             # IOC enrichment
+|
++-- winlogbeat/
+    +-- winlogbeat.yml           # collector config (deployed to DC)
+    +-- install-winlogbeat.ps1   # DC installer + audit policy + SACLs
+    +-- setup-dc.ps1             # DC promotion + AD lab objects (Phase1/Phase2)
 ```
 
 ---
