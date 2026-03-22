@@ -211,13 +211,13 @@ function Invoke-KustoMgmt {
     try {
         Invoke-RestMethod -Uri "$ADX_URL/v1/rest/mgmt" -Method Post `
             -ContentType 'application/json' -Body $body -ErrorAction Stop | Out-Null
-        if ($Label) { Write-Host "  `u{2713}  $Label" }
+        if ($Label) { Write-Host "  [OK]  $Label" }
     } catch {
         $msg = $_.ToString()
         if ($msg -match 'already.?exists|entityalreadyexists|alreadyexists') {
-            if ($Label) { Write-Host "  `u{2713}  $Label (already exists)" }
+            if ($Label) { Write-Host "  [OK]  $Label (already exists)" }
         } else {
-            Write-Host "  `u{2717}  ${Label}: $msg" -ForegroundColor Red
+            Write-Host "  [FAIL]  ${Label}: $msg" -ForegroundColor Red
             throw
         }
     }
@@ -270,7 +270,8 @@ Start-Sleep -Seconds 3
 $testEvent = '{"@timestamp":"2026-03-20T00:00:00.000Z","winlog":{"computer_name":"setup-test","event_id":1,"channel":"SetupTest","provider_name":"KQL-Lab-Setup","event_data":{"note":"setup verification"}},"log":{"level":"information"},"message":"Setup verification event - safe to delete"}'
 try {
     $r = Invoke-WebRequest -Uri 'http://localhost:9001/ingest' -Method Post `
-        -ContentType 'application/json' -Body $testEvent -ErrorAction Stop
+        -ContentType 'application/json' -Body $testEvent `
+        -UseBasicParsing -ErrorAction Stop
     log "Relay ingest test PASSED (HTTP $($r.StatusCode))."
 } catch {
     warn "Relay returned an error: $_"
