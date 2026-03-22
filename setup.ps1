@@ -120,9 +120,9 @@ if ($freeGB -lt $DATA_MIN_FREE_GB) {
 # Data directory size
 $dataDir = Join-Path $ScriptDir 'data'
 if (Test-Path $dataDir) {
-    $dataSizeGB = [math]::Round(
-        ([double](Get-ChildItem $dataDir -Recurse -ErrorAction SilentlyContinue |
-         Measure-Object -Property Length -Sum).Sum) / 1GB, 1)
+    $_files     = Get-ChildItem $dataDir -Recurse -File -ErrorAction SilentlyContinue
+    $_measured  = if ($_files) { ($_files | Measure-Object -Property Length -Sum).Sum } else { 0 }
+    $dataSizeGB = [math]::Round([double]$_measured / 1GB, 1)
     if ($dataSizeGB -gt $DATA_MAX_GB) {
         warn ".\data\ is ${dataSizeGB} GB - over the ${DATA_MAX_GB} GB cap. Run .\teardown.ps1 --purge to reclaim space."
     } else {
