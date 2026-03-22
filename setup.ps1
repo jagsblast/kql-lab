@@ -287,11 +287,23 @@ Compress-Archive -Path (Join-Path $ScriptDir 'winlogbeat\*') -DestinationPath $z
 log "winlogbeat-dc.zip ready (for manual DC deployment - see step 7 for automated option)."
 Write-Host ''
 
-# Detect host IP - used by DC provisioning and summary
-$hostIP = (Get-NetIPAddress -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.PrefixOrigin -ne 'WellKnown' } |
-    Sort-Object InterfaceMetric |
-    Select-Object -First 1).IPAddress
+# Detect host IP - used by DC provisioning and summary.
+# When DC_HOST is set, ask Windows which source IP it would use to reach the DC
+# (Find-NetRoute picks the correct interface even when VPNs are active).
+# Fall back to metric-sorted list if Find-NetRoute is unavailable.
+$hostIP = $null
+if ($DC_HOST) {
+    try {
+        $route  = Find-NetRoute -RemoteIPAddress $DC_HOST -ErrorAction Stop
+        $hostIP = ($route | Select-Object -First 1).IPAddress
+    } catch { }
+}
+if (-not $hostIP) {
+    $hostIP = (Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.PrefixOrigin -ne 'WellKnown' } |
+        Sort-Object InterfaceMetric |
+        Select-Object -First 1).IPAddress
+}
 
 # -- 7. DC provisioning -------------------------------------------------------
 $DC_HOST = if ($env:DC_HOST) { $env:DC_HOST } else { $null }
