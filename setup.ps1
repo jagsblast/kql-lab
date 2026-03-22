@@ -86,18 +86,18 @@ if ($totalRAMGB -lt 4) {
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     fail "docker not found.`nInstall Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
 }
-$dockerInfo = $null
-try {
-    $dockerInfo = & docker info 2>&1
-} catch { }
-if ($LASTEXITCODE -ne 0 -or $dockerInfo -match 'error during connect') {
-    $errLine = ($dockerInfo | Select-Object -First 1)
-    $hint = if ($errLine -match 'LinuxEngine|linux') {
+# Use 'docker ps' — simpler than 'docker info' and less noisy on stderr.
+# Capture output and exit code in isolation to avoid $LASTEXITCODE bleed from prior commands.
+$dockerTest = $null
+$dockerTest = & cmd /c "docker ps >nul 2>&1 && echo OK || echo FAIL" 2>&1
+if ($dockerTest -notmatch 'OK') {
+    $dockerErr = (& docker ps 2>&1 | Select-Object -First 2) -join ' '
+    $hint = if ($dockerErr -match 'LinuxEngine|linux') {
         "Docker Desktop is in Windows containers mode.`n  Right-click the tray icon -> 'Switch to Linux containers...' then retry."
     } else {
-        "Docker Desktop is not ready. Wait for the tray icon to stop animating, then retry."
+        "Docker Desktop is not ready. Wait for the tray icon to stop animating, then retry.`n  Run: docker ps"
     }
-    fail "Cannot connect to Docker Desktop.`n  $hint`n  Raw error: $errLine"
+    fail "Cannot connect to Docker Desktop.`n  $hint`n  Error: $dockerErr"
 }
 & docker compose version 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
