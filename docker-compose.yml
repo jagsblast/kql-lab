@@ -63,7 +63,7 @@ services:
     environment:
       KUSTAINER_URL:     "http://adx:8080"
       KUSTAINER_DB:      "NetDefaultDB"
-      KUSTAINER_TABLE:   "WindowsEvent"
+      KUSTAINER_TABLE:   "WindowsEvents"
       KUSTAINER_MAPPING: "winlogbeat_mapping"
       RELAY_PORT:        "9001"
       BATCH_MAX:         "500"
